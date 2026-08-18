@@ -104,9 +104,12 @@ int flycast_init(int argc, char* argv[])
 			config::Settings::instance().load(false);
 		}
 		i18n::reloadLanguage();
-		gui_init();
-		os_CreateWindow();
-		os_SetupInput();
+		if (!settings.headless)
+		{
+			gui_init();
+			os_CreateWindow();
+			os_SetupInput();
+		}
 
 		if(config::GDB)
 			debugger::init(config::GDBPort + config::loadInt("naomi", "BoardId"));
@@ -171,9 +174,14 @@ void flycast_term()
 	gui_cancel_load();
 	lua::term();
 	emu.term();
-	os_DestroyWindow();
-	gui_term();
-	os_TermInput();
+	// Headless never created a window or opened any input device.
+	// os_DestroyWindow() would also save bogus window geometry to the config.
+	if (!settings.headless)
+	{
+		os_DestroyWindow();
+		gui_term();
+		os_TermInput();
+	}
 }
 
 bool dc_savestateAllowed() {

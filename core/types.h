@@ -218,6 +218,7 @@ struct settings_t
 	} naomi;
 
 	bool raHardcoreMode;
+	bool headless;
 };
 
 extern settings_t settings;

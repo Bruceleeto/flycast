@@ -30,6 +30,7 @@
 #include "oslib/i18n.h"
 
 #include <chrono>
+#include <csignal>
 #include <thread>
 
 static bool mainui_enabled;
@@ -94,11 +95,56 @@ void mainui_term()
 	rend_term_renderer();
 }
 
+static volatile std::sig_atomic_t headlessStopRequested;
+
+static void headlessSignalHandler(int sig)
+{
+	headlessStopRequested = 1;
+	// The flag is only checked between frames. Restore the default handler so a
+	// second signal kills outright if the current frame never returns.
+	std::signal(sig, SIG_DFL);
+}
+
+// Runs the emulator with no window, GUI or presentation. The renderer is
+// norend, so nothing is drawn.
+static void mainui_headless_loop()
+{
+	if (settings.content.path.empty())
+	{
+		ERROR_LOG(BOOT, "Headless mode requires a content path");
+		return;
+	}
+	headlessStopRequested = 0;
+	std::signal(SIGINT, headlessSignalHandler);
+	std::signal(SIGTERM, headlessSignalHandler);
+
+	mainui_init();
+	try {
+		emu.loadGame(settings.content.path.c_str());
+		// Must be after loadGame(): it resets and reloads every option.
+		config::ThreadedRendering.set(false);	// nothing presents, so no one to feed
+		config::AudioBackend.set("null");
+		emu.start();
+		while (mainui_enabled && !headlessStopRequested && emu.render())
+			MainFrameCount++;
+		NOTICE_LOG(BOOT, "Headless: stopped after %u frames", MainFrameCount);
+		emu.unloadGame();
+	} catch (const FlycastException& e) {
+		ERROR_LOG(BOOT, "Headless: %s", e.what());
+	}
+	mainui_term();
+}
+
 void mainui_loop(bool forceStart)
 {
 	ThreadName _("Flycast-rend");
 	if (forceStart)
 		mainui_enabled = true;
+	if (settings.headless)
+	{
+		mainui_headless_loop();
+		return;
+	}
 	mainui_init();
 	RenderType currentRenderer = config::RendererType;
 

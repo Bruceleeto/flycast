@@ -30,7 +30,17 @@ static void usage(const char *exe)
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "-config section:key=value,...  set a transient config value.\n");
 	fprintf(stderr, "                               Transient config values won't be saved to emu.cfg.\n");
+	fprintf(stderr, "-headless                      run without a window, GUI or renderer.\n");
+	fprintf(stderr, "                               Requires a content path. Audio is disabled.\n");
 	fprintf(stderr, "-help                          display this help\n");
+}
+
+bool headlessRequested(int argc, const char * const argv[])
+{
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "-headless") || !strcmp(argv[i], "--headless"))
+			return true;
+	return false;
 }
 
 static void parseConfigOption(const std::string& str)
@@ -176,6 +186,10 @@ void parseCommandLine(int argc, const char * const argv[])
 		if (!strcmp(argv[i], "-help") || !strcmp(argv[i], "--help")) {
 			usage(exe);
 			exit(0);
+		}
+		if (!strcmp(argv[i], "-headless") || !strcmp(argv[i], "--headless")) {
+			settings.headless = true;
+			continue;
 		}
 		if (!strcmp(argv[i], "-config") || !strcmp(argv[i], "--config"))
 		{
