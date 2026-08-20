@@ -119,6 +119,8 @@ void mmu_TranslateSQW(u32 adr, u32* out);
 #ifdef FAST_MMU
 // maps 4K virtual page number to physical address
 extern u32 mmuAddressLUT[0x100000];
+extern u32 mmuLastPageMask;
+extern bool mmuStrict;
 
 static inline void mmuAddressLUTFlush(bool full)
 {
@@ -153,7 +155,9 @@ static inline u32 DYNACALL mmuDynarecLookup(u32 vaddr, u32 write, u32 pc)
 		return 0;
 	}
 #ifdef FAST_MMU
-	if (vaddr >> 31 == 0)
+	// The LUT is 4K-granular, so a smaller page must not enter it, and a strict
+	// guest none at all: the inline lookup then misses and calls through here.
+	if (!mmuStrict && vaddr >> 31 == 0 && (mmuLastPageMask & 0xFFF) == 0)
 		mmuAddressLUT[vaddr >> 12] = paddr & ~0xfff;
 #endif
 

@@ -38,6 +38,14 @@ static TLB_Entry const *lru_entry;
 static u32 lru_mask;
 static u32 lru_address;
 
+// Page mask of the last successful data translation, to keep sub-4K pages
+// out of the 4K-granular mmuAddressLUT.
+u32 mmuLastPageMask = 0xFFFFF000;
+
+// Guests the cached fast path can't serve: sub-4K pages, ASID switching used
+// as a dispatch mechanism, emulation driven by TLB protection faults.
+bool mmuStrict = false;
+
 struct TLB_LinkedEntry {
 	TLB_Entry entry;
 	TLB_LinkedEntry *next_entry;
@@ -54,8 +62,6 @@ static u16 bucket_index(u32 address, int size, u32 asid)
 
 static void cache_entry(const TLB_Entry &entry)
 {
-	if (entry.Data.SZ0 == 0 && entry.Data.SZ1 == 0)
-		return;
 	if (full_table_size >= std::size(full_table))
 		return;
 
@@ -100,6 +106,9 @@ bool find_entry_by_page_size(u32 address, const TLB_Entry **ret_entry)
 
 static bool find_entry(u32 address, const TLB_Entry **ret_entry)
 {
+	// 1k
+	if (find_entry_by_page_size<0>(address, ret_entry))
+		return true;
 	// 4k
 	if (find_entry_by_page_size<1>(address, ret_entry))
 		return true;
@@ -217,6 +226,29 @@ void ITLB_Sync(u32 entry)
 //Do a full lookup on the UTLB entry's
 MmuError mmu_full_lookup(u32 va, const TLB_Entry** tlb_entry_ret, u32& rv)
 {
+	if (mmuStrict)
+	{
+		// No LRU, no hash cache, no synthesized entries
+		const TLB_Entry *match = nullptr;
+		for (const TLB_Entry& tlb_entry : UTLB)
+		{
+			if (!mmu_match(va, tlb_entry.Address, tlb_entry.Data))
+				continue;
+			if (match != nullptr)
+				return MmuError::TLB_MHIT;
+			match = &tlb_entry;
+			u32 sz = tlb_entry.Data.SZ1 * 2 + tlb_entry.Data.SZ0;
+			u32 mask = mmu_mask[sz];
+			rv = ((tlb_entry.Data.PPN << 10) & mask) | (va & ~mask);
+			lru_mask = mask;
+		}
+		if (match == nullptr)
+			return MmuError::TLB_MISS;
+		if (tlb_entry_ret != nullptr)
+			*tlb_entry_ret = match;
+		return MmuError::NONE;
+	}
+
 	if (lru_entry != NULL)
 	{
 		if (/*lru_entry->Data.V == 1 && */
@@ -298,6 +330,7 @@ MmuError mmu_data_translation(u32 va, u32& rv)
 	if (fast_reg_lut[va >> 29] != 0)
 	{
 		rv = va;
+		mmuLastPageMask = 0xFFFFF000;
 		return MmuError::NONE;
 	}
 
@@ -305,10 +338,28 @@ MmuError mmu_data_translation(u32 va, u32& rv)
 	{
 		// On-chip RAM area isn't translated
 		rv = va;
+		mmuLastPageMask = 0xFFFFF000;
 		return MmuError::NONE;
 	}
 
-	MmuError lookup = mmu_full_lookup(va, nullptr, rv);
+	const TLB_Entry *entry = nullptr;
+	MmuError lookup = mmu_full_lookup(va, &entry, rv);
+	if (lookup == MmuError::NONE)
+	{
+		mmuLastPageMask = lru_mask;
+		if (mmuStrict)
+		{
+			if ((entry->Data.PR >> 1) == 0 && Sh4cntx.sr.MD == 0)
+				return MmuError::PROTECTED;
+			if (translation_type == MMU_TT_DWRITE)
+			{
+				if ((entry->Data.PR & 1) == 0)
+					return MmuError::PROTECTED;
+				else if (entry->Data.D == 0)
+					return MmuError::FIRSTWRITE;
+			}
+		}
+	}
 	if (lookup == MmuError::NONE && (rv & 0x1C000000) == 0x1C000000)
 		// map 1C000000-1FFFFFFF to P4 memory-mapped registers
 		rv |= 0xF0000000;

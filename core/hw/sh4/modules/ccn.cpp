@@ -29,7 +29,7 @@ static void CCN_PTEH_write(u32 addr, u32 value)
 	temp.reg_data = value & 0xfffffcff;
 #ifdef FAST_MMU
 	if (temp.ASID != CCN_PTEH.ASID)
-		mmuAddressLUTFlush(false);
+		mmuAddressLUTFlush(true);
 #endif
 
 	CCN_PTEH = temp;
