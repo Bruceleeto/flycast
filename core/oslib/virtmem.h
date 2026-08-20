@@ -7,6 +7,11 @@
 #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size];
 #elif defined(__OpenBSD__)
 #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size] __attribute__((section(".openbsd.mutable")));
+#elif defined(__linux__) && defined(__x86_64__)
+// Allocated at runtime by prepare_jit_block, which places it within rel32
+// range of the executable. A static .text array would work too but grows the
+// binary by the cache size.
+#define DECLARE_CODE_CACHE(Name, Size) static u8 *Name;
 #elif defined(__unix__) || defined(__SWITCH__) || defined(__HAIKU__)
 #define DECLARE_CODE_CACHE(Name, Size) alignas(4096) static u8 Name[Size] __attribute__((section(".text")));
 #else

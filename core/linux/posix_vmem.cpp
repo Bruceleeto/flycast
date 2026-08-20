@@ -255,6 +255,41 @@ bool prepare_jit_block(void *code_area, size_t size, void **code_area_rwx)
         *code_area_rwx = code_area;
         return true;
     }
+	if (code_area == nullptr)
+	{
+		// Runtime-allocated cache (pointer-form DECLARE_CODE_CACHE): place it
+		// within rel32 range of the executable so emitted calls to C helpers
+		// reach, same strategy as the Windows backend.
+		const uintptr_t base_addr = reinterpret_cast<uintptr_t>(&ondemand_page) & ~0xFFFFFul;
+		for (uintptr_t i = 64_MB; i < 1800_MB; i += 64_MB)
+		{
+			for (int dir = 0; dir < 2; dir++)
+			{
+				if (dir == 1 && base_addr < i)
+					continue;
+				const uintptr_t try_addr = dir == 0 ? base_addr + i : base_addr - i;
+#ifdef MAP_FIXED_NOREPLACE
+				constexpr int mapFlags = MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE;
+#else
+				constexpr int mapFlags = MAP_PRIVATE | MAP_ANON;
+#endif
+				void *ptr = mmap((void *)try_addr, size, PROT_READ | PROT_WRITE | PROT_EXEC, mapFlags, -1, 0);
+				if (ptr == MAP_FAILED)
+					continue;
+				// without MAP_FIXED_NOREPLACE the hint may be ignored, so
+				// verify the result is still in rel32 range
+				const uintptr_t dist = (uintptr_t)ptr > base_addr ? (uintptr_t)ptr - base_addr : base_addr - (uintptr_t)ptr;
+				if (dist + size >= 2048_MB)
+				{
+					munmap(ptr, size);
+					continue;
+				}
+				*code_area_rwx = ptr;
+				return true;
+			}
+		}
+		// fall through to the arbitrary-address fallback below
+	}
 #ifndef TARGET_MAC
     void *ret_ptr = MAP_FAILED;
     if (code_area != nullptr)

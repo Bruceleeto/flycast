@@ -15,7 +15,9 @@
 
 #if FEAT_SHREC != DYNAREC_NONE
 
-constexpr u32 CODE_SIZE = 10_MB;
+// bleem-style guests JIT their own code continuously (~1MB/s of fresh blocks),
+// so a small buffer forces a full ResetCache hitch every few seconds
+constexpr u32 CODE_SIZE = 64_MB;
 constexpr u32 TEMP_CODE_SIZE = 1_MB;
 constexpr u32 FULL_SIZE = CODE_SIZE + TEMP_CODE_SIZE;
 DECLARE_CODE_CACHE(SH4_TCB, FULL_SIZE)

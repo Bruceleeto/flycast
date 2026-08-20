@@ -76,8 +76,10 @@ MmuError mmu_full_SQ(u32 va, u32& rv);
 #ifdef FAST_MMU
 static inline MmuError mmu_instruction_translation(u32 va, u32& rv)
 {
-	if (fast_reg_lut[va >> 29] != 0)
+	if (fast_reg_lut[va >> 29] != 0 || CCN_MMUCR.AT == 0)
 	{
+		// AT == 0: MMU handlers stay installed across strict guests' AT-off
+		// windows, but the hardware does no translation
 		rv = va;
 		return MmuError::NONE;
 	}
@@ -121,6 +123,11 @@ void mmu_TranslateSQW(u32 adr, u32* out);
 extern u32 mmuAddressLUT[0x100000];
 extern u32 mmuLastPageMask;
 extern bool mmuStrict;
+
+// Invalidate the strict-mode translation cache. Must be called whenever the
+// set of matching UTLB entries can change: UTLB writes, PTEH.ASID change,
+// MMUCR writes (SV/TI), TLB flush, savestate load.
+void mmuStrictCacheFlush();
 
 static inline void mmuAddressLUTFlush(bool full)
 {

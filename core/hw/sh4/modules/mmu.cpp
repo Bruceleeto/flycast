@@ -464,6 +464,9 @@ void mmu_set_state()
 			mmuOn = true;
 #ifdef FAST_MMU
 			mmuStrict = true;
+			// ASID changes no longer flush these in strict mode, so start clean
+			mmuAddressLUTFlush(true);
+			mmuStrictCacheFlush();
 #endif
 			static bool logged;
 			if (!logged)
@@ -624,4 +627,7 @@ void mmu_deserialize(Deserializer& deser)
 
 	deser >> sq_remap;
 	deser.skip(64 * 4, Deserializer::V23); // ITLB_LRU_USE
+#ifdef FAST_MMU
+	mmuStrictCacheFlush();
+#endif
 }
