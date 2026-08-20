@@ -465,7 +465,12 @@ void mmu_set_state()
 #ifdef FAST_MMU
 			mmuStrict = true;
 #endif
-			NOTICE_LOG(SH4, "Enabling Full MMU support (UTLB loaded before AT, strict TLB)");
+			static bool logged;
+			if (!logged)
+			{
+				logged = true;
+				NOTICE_LOG(SH4, "Enabling Full MMU support (UTLB loaded before AT, strict TLB)");
+			}
 		}
 		// Detect if we're running Windows CE
 		static const char magic[] = { 'S', 0, 'H', 0, '-', 0, '4', 0, ' ', 0, 'K', 0, 'e', 0, 'r', 0, 'n', 0, 'e', 0, 'l', 0 };
