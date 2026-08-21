@@ -72,6 +72,46 @@ void mmuStrictCacheFlush()
 	memset(strictCache, 0, sizeof(strictCache));
 }
 
+// Instruction-side translation cache for block dispatch (bm_GetCodeByVAddr).
+// The hardware ITLB has only 4 entries, so per-block instruction translation
+// thrashes it and falls back to full UTLB walks; together they dominate the
+// dispatch cost under full MMU. This direct-mapped, ASID-tagged, 1K-granular
+// cache remembers (vpage, asid) -> physical page. It holds translations only
+// (never code pointers), so block invalidation/SMC needs no hooks here: the
+// FPCB stays the single authority for vaddr->code. Flush whenever the match
+// set can change: UTLB/ITLB writes, MMUCR writes, TLB flush, deserialize.
+struct ITransCacheEntry
+{
+	u32 tag;		// bit 31 = valid | ASID << 22 | va >> 10; zero-init is empty
+	u32 pbase;		// physical page base (1K aligned)
+};
+constexpr u32 ITransCacheSize = 16384;	// 16MB of code working set at 1K pages
+static ITransCacheEntry iTransCache[ITransCacheSize];
+
+void mmuITransCacheFlush()
+{
+	memset(iTransCache, 0, sizeof(iTransCache));
+}
+
+MmuError mmu_instruction_translation_cached(u32 va, u32& rv)
+{
+	const u32 asid = CCN_PTEH.ASID;
+	const u32 tag = 0x80000000u | (asid << 22) | (va >> 10);
+	ITransCacheEntry& e = iTransCache[((va >> 10) ^ (asid << 5)) & (ITransCacheSize - 1)];
+	if (e.tag == tag)
+	{
+		rv = e.pbase | (va & 0x3FF);
+		return MmuError::NONE;
+	}
+	MmuError err = mmu_instruction_translation(va, rv);
+	if (err == MmuError::NONE)
+	{
+		e.tag = tag;
+		e.pbase = rv & ~0x3FFu;
+	}
+	return err;
+}
+
 struct TLB_LinkedEntry {
 	TLB_Entry entry;
 	TLB_LinkedEntry *next_entry;
@@ -214,6 +254,7 @@ int main(int argc, char *argv[])
 bool UTLB_Sync(u32 entry)
 {
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 	TLB_Entry& tlb_entry = UTLB[entry];
 	u32 sz = tlb_entry.Data.SZ1 * 2 + tlb_entry.Data.SZ0;
 
@@ -261,6 +302,7 @@ bool UTLB_Sync(u32 entry)
 
 void ITLB_Sync(u32 entry)
 {
+	mmuITransCacheFlush();
 }
 
 //Do a full lookup on the UTLB entry's
@@ -456,5 +498,6 @@ void mmu_flush_table()
 	flush_cache();
 	mmuAddressLUTFlush(true);
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 }
 #endif 	// FAST_MMU

@@ -58,6 +58,7 @@ static void CCN_MMUCR_write(u32 addr, u32 value)
 #ifdef FAST_MMU
 	// SV affects UTLB matching
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 #endif
 
 	if (mmu_changed_state)

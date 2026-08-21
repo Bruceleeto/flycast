@@ -86,6 +86,13 @@ static inline MmuError mmu_instruction_translation(u32 va, u32& rv)
 
 	return mmu_full_lookup(va, nullptr, rv);
 }
+
+// Block-dispatch wrapper with the ASID-tagged instruction translation cache
+// (see fastmmu.cpp). Cache translations only, never code pointers.
+MmuError mmu_instruction_translation_cached(u32 va, u32& rv);
+// Flush it whenever the match set can change: UTLB/ITLB writes, MMUCR
+// writes, TLB flush, deserialize.
+void mmuITransCacheFlush();
 #else
 MmuError mmu_instruction_translation(u32 va, u32& rv);
 #endif

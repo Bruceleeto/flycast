@@ -142,12 +142,24 @@ DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr)
 	}
 
 	u32 paddr;
+#ifdef FAST_MMU
+	MmuError rv = mmu_instruction_translation_cached(addr, paddr);
+	if (rv != MmuError::NONE)
+	{
+		DoMMUException(addr, rv, MMU_TT_IREAD);
+		mmu_instruction_translation_cached(Sh4cntx.pc, paddr);
+		// faulted: what runs next is the handler, not code at addr
+		return bm_GetCode(paddr);
+	}
+#else
 	MmuError rv = mmu_instruction_translation(addr, paddr);
 	if (rv != MmuError::NONE)
 	{
 		DoMMUException(addr, rv, MMU_TT_IREAD);
 		mmu_instruction_translation(Sh4cntx.pc, paddr);
+		return bm_GetCode(paddr);
 	}
+#endif
 
 	return bm_GetCode(paddr);
 }

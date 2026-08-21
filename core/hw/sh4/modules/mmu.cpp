@@ -467,6 +467,7 @@ void mmu_set_state()
 			// ASID changes no longer flush these in strict mode, so start clean
 			mmuAddressLUTFlush(true);
 			mmuStrictCacheFlush();
+			mmuITransCacheFlush();
 #endif
 			static bool logged;
 			if (!logged)
@@ -645,6 +646,7 @@ void mmu_deserialize(Deserializer& deser)
 	deser.skip(64 * 4, Deserializer::V23); // ITLB_LRU_USE
 #ifdef FAST_MMU
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 	if (mmuLutTagged)
 	{
 		// entries from the previous machine state are meaningless now
