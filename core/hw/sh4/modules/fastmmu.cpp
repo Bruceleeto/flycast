@@ -91,6 +91,11 @@ static ITransCacheEntry iTransCache[ITransCacheSize];
 void mmuITransCacheFlush()
 {
 	memset(iTransCache, 0, sizeof(iTransCache));
+#if FEAT_SHREC != DYNAREC_NONE
+	// dispatch-cache entries bake in a translation, so they go stale together
+	extern void bm_DispatchCacheInvalidate();
+	bm_DispatchCacheInvalidate();
+#endif
 }
 
 MmuError mmu_instruction_translation_cached(u32 va, u32& rv)
