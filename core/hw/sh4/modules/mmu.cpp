@@ -437,10 +437,41 @@ retry_ITLB_Match:
 	return MmuError::NONE;
 }
 
+// True if the UTLB already holds a mapping that isn't a store queue remap.
+// Some titles load every entry with AT still 0 and enable translation last,
+// so UTLB_Sync's on-demand check never fires for them.
+static bool utlbHasRealMapping()
+{
+	for (const TLB_Entry& e : UTLB)
+	{
+		if (e.Data.V == 0)
+			continue;
+		if ((e.Address.VPN & (0xFC000000 >> 10)) == (0xE0000000 >> 10))
+			continue;	// store queue remap
+		if (e.Address.VPN == 0x30040 || e.Address.VPN == 0x30000)
+			continue;	// bogus mappings used by some arcade/VC games, as in UTLB_Sync
+		return true;
+	}
+	return false;
+}
+
 void mmu_set_state()
 {
 	if (CCN_MMUCR.AT == 1)
 	{
+		if (!mmuOn && utlbHasRealMapping())
+		{
+			mmuOn = true;
+#ifdef FAST_MMU
+			mmuStrict = true;
+#endif
+			static bool logged;
+			if (!logged)
+			{
+				logged = true;
+				NOTICE_LOG(SH4, "Enabling Full MMU support (UTLB loaded before AT, strict TLB)");
+			}
+		}
 		// Detect if we're running Windows CE
 		static const char magic[] = { 'S', 0, 'H', 0, '-', 0, '4', 0, ' ', 0, 'K', 0, 'e', 0, 'r', 0, 'n', 0, 'e', 0, 'l', 0 };
 		if (memcmp(GetMemPtr(0x8c0110a8, 4), magic, sizeof(magic)) == 0
