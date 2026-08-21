@@ -127,11 +127,21 @@ void mmu_TranslateSQW(u32 adr, u32* out);
 // tag so the result is directly the page base. ASID switches then just
 // update mmuAsidTag instead of wiping the 2MB table, keeping it warm across
 // the guest OS's process switches (WinCE does these constantly).
-extern u32 mmuAddressLUT[0x100000];
+// The tag sits immediately before the table on purpose: backends pin the
+// table base in a register, so the tag is reachable at [base - 4] without
+// materializing a second 64-bit address in the inline lookup.
+struct MmuLut
+{
+	u32 asidTag;
+	u32 entries[0x100000];
+};
+extern MmuLut mmuLut;
+inline u32 (&mmuAddressLUT)[0x100000] = mmuLut.entries;
+inline u32 &mmuAsidTag = mmuLut.asidTag;
+
 extern u32 mmuLastPageMask;
 extern bool mmuStrict;
 extern bool mmuLutTagged;
-extern u32 mmuAsidTag;
 
 // Invalidate the strict-mode translation cache. Must be called whenever the
 // set of matching UTLB entries can change: UTLB writes, PTEH.ASID change,

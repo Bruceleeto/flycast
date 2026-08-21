@@ -1732,17 +1732,36 @@ private:
 			Label inCache;
 			Label done;
 
-			Lsr(w1, w0, 12);
-			Ldr(w1, MemOperand(x27, x1, LSL, 2));
-			Cbnz(w1, &inCache);
+			// strict guests never populate the LUT, so the inline check
+			// would always miss
+			if (!mmuStrict)
+			{
+				Lsr(w1, w0, 12);
+				Ldr(w1, MemOperand(x27, x1, LSL, 2));
+				if (mmuLutTagged)
+				{
+					// entry ^ current tag: low 12 bits zero = hit for this
+					// ASID, and the XOR has already yielded the bare page
+					// base. The tag lives at [lut - 4], see MmuLut.
+					Ldr(w2, MemOperand(x27, -4));
+					Eor(w1, w1, w2);
+					Tst(w1, 0xFFF);
+					B(&inCache, eq);
+				}
+				else
+					Cbnz(w1, &inCache);
+			}
 			Mov(w1, write);
 			Mov(w2, block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
 			GenCallRuntime(mmuDynarecLookup);
-			B(&done);
-			Bind(&inCache);
-			And(w0, w0, 0xFFF);
-			Orr(w0, w0, w1);
-			Bind(&done);
+			if (!mmuStrict)
+			{
+				B(&done);
+				Bind(&inCache);
+				And(w0, w0, 0xFFF);
+				Orr(w0, w0, w1);
+				Bind(&done);
+			}
 		}
 	}
 

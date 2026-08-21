@@ -500,11 +500,11 @@ void mmu_set_state()
 }
 
 #ifdef FAST_MMU
-u32 mmuAddressLUT[0x100000];
-// see mmu.h. Tagged mode needs the backend's inline lookup to check the tag,
-// only implemented in rec-x64 so far.
+// zero-initialized: a zero tag would make a zero (empty) entry look like a
+// hit, so mmu_set_state seeds it with PTEH.ASID + 1 before any lookup runs
+MmuLut mmuLut;
+// see mmu.h. Tagged mode needs the backend's inline lookup to check the tag.
 bool mmuLutTagged;
-u32 mmuAsidTag = 1;
 #endif
 
 void MMU_init()
@@ -525,7 +525,7 @@ void MMU_init()
 	}
 	mmu_set_state();
 #ifdef FAST_MMU
-#if HOST_CPU == CPU_X64 && FEAT_SHREC == DYNAREC_JIT
+#if (HOST_CPU == CPU_X64 || HOST_CPU == CPU_ARM64) && FEAT_SHREC == DYNAREC_JIT
 	mmuLutTagged = true;
 #endif
 	if (!mmuLutTagged)
