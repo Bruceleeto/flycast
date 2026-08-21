@@ -52,6 +52,33 @@ static DynarecCodeEntryPtr DYNACALL bm_GetCode(u32 addr)
 	return rv;
 }
 
+// Dispatch cache for bm_GetCodeByVAddr under full MMU: (vaddr, ASID) -> code
+// pointer. The FPCB is a 128MB table, so the plain path pays a DRAM-latency
+// miss on every single block dispatch, on top of the instruction translation;
+// this small direct-mapped cache replaces both with one hot load. The
+// FailedToFindBlock sentinel is never cached, so newly compiled blocks need
+// no invalidation; block removal and TLB changes bump the generation, which
+// invalidates every entry in O(1) (bm_DispatchCacheInvalidate).
+struct BmDispatchEntry
+{
+	u32 vaddr;
+	u32 meta;		// generation << 8 | ASID; zero-init never matches (gen >= 1)
+	DynarecCodeEntryPtr code;
+};
+constexpr u32 BmDispatchCacheSize = 65536;
+static BmDispatchEntry bmDispatchCache[BmDispatchCacheSize];
+static u32 bmDispatchGen = 1;
+
+void bm_DispatchCacheInvalidate()
+{
+	if (++bmDispatchGen >= 1u << 24)
+	{
+		// meta only holds 24 generation bits: on wrap, really clear
+		bmDispatchGen = 1;
+		memset(bmDispatchCache, 0, sizeof(bmDispatchCache));
+	}
+}
+
 // addr must be a virtual address
 // This returns an executable address
 DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr)
@@ -141,15 +168,45 @@ DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr)
 		addr = Sh4cntx.pc;
 	}
 
+	static const bool cacheOff = getenv("MMU_NO_DSPC") != nullptr;	// A/B switch
+	const u32 asid = CCN_PTEH.ASID;
+	const u32 meta = (bmDispatchGen << 8) | asid;
+	// mix the high PC bits in: WinCE gameplay has megabytes of live code,
+	// and a low-bits-only index thrashes on 128KB-apart collisions
+	BmDispatchEntry& entry = bmDispatchCache[((addr >> 1) ^ (addr >> 14) ^ (asid << 9)) & (BmDispatchCacheSize - 1)];
+	if (entry.vaddr == addr && entry.meta == meta && !cacheOff)
+		return entry.code;
+
 	u32 paddr;
+#ifdef FAST_MMU
+	MmuError rv = mmu_instruction_translation_cached(addr, paddr);
+	if (rv != MmuError::NONE)
+	{
+		DoMMUException(addr, rv, MMU_TT_IREAD);
+		mmu_instruction_translation_cached(Sh4cntx.pc, paddr);
+		// faulted: what runs next is the handler, not code at addr
+		return bm_GetCode(paddr);
+	}
+#else
 	MmuError rv = mmu_instruction_translation(addr, paddr);
 	if (rv != MmuError::NONE)
 	{
 		DoMMUException(addr, rv, MMU_TT_IREAD);
 		mmu_instruction_translation(Sh4cntx.pc, paddr);
+		return bm_GetCode(paddr);
 	}
+#endif
 
-	return bm_GetCode(paddr);
+	DynarecCodeEntryPtr code = bm_GetCode(paddr);
+	if ((void *)code != (void *)ngen_FailedToFindBlock)
+	{
+		// never cache the compile trampoline, or a freshly compiled block
+		// would keep dispatching into the compiler
+		entry.vaddr = addr;
+		entry.meta = meta;
+		entry.code = code;
+	}
+	return code;
 }
 
 // addr must be a physical address
@@ -240,6 +297,7 @@ void bm_AddBlock(RuntimeBlockInfo* blk)
 
 void bm_DiscardBlock(RuntimeBlockInfo* block)
 {
+	bm_DispatchCacheInvalidate();
 	// Remove from block map
 	auto it = blkmap.find((void*)block->code);
 	verify(it != blkmap.end());
@@ -277,6 +335,7 @@ void bm_vmem_pagefill(void** ptr, u32 size_bytes)
 
 void bm_Reset()
 {
+	bm_DispatchCacheInvalidate();
 	bm_CleanupDeletedBlocks();
 	protected_blocks = 0;
 	unprotected_blocks = 0;
@@ -326,6 +385,7 @@ void bm_UnlockPage(u32 addr, u32 size)
 
 void bm_ResetCache()
 {
+	bm_DispatchCacheInvalidate();
 	sh4Dynarec->reset();
 	addrspace::bm_reset();
 
@@ -367,6 +427,7 @@ void bm_ResetCache()
 
 void bm_ResetTempCache(bool full)
 {
+	bm_DispatchCacheInvalidate();
 	if (!full)
 	{
 		for (const auto& block : all_temp_blocks)

@@ -5,6 +5,9 @@
 #include "hw/sh4/sh4_core.h"
 #include "debug/gdb_server.h"
 #include "serialize.h"
+#include <map>
+#include <vector>
+#include <algorithm>
 
 TLB_Entry UTLB[64];
 TLB_Entry ITLB[4];
@@ -160,6 +163,7 @@ static void mmuException(MmuError mmu_error, u32 address, u32 am, F raise)
 	});
 	die("Unknown mmu_error");
 }
+
 
 
 void DoMMUException(u32 address, MmuError mmu_error, u32 access_type)
@@ -467,6 +471,7 @@ void mmu_set_state()
 			// ASID changes no longer flush these in strict mode, so start clean
 			mmuAddressLUTFlush(true);
 			mmuStrictCacheFlush();
+			mmuITransCacheFlush();
 #endif
 			static bool logged;
 			if (!logged)
@@ -489,12 +494,23 @@ void mmu_set_state()
 		mmuOn = false;
 	}
 
+#ifdef FAST_MMU
+	// keep the tag in sync wherever PTEH may have changed without a write
+	// (reset, deserialize): a desynced tag would let another ASID's entries hit
+	mmuAsidTag = CCN_PTEH.ASID + 1;
+#endif
+
 	SetMemoryHandlers();
 	setSqwHandler();
 }
 
 #ifdef FAST_MMU
 u32 mmuAddressLUT[0x100000];
+// see mmu.h. Tagged mode needs the backend's inline lookup to check the tag,
+// only implemented in rec-x64 so far. MMU_NO_ASIDLUT reverts to the old
+// flush-on-ASID-switch behaviour for A/B comparisons.
+bool mmuLutTagged;
+u32 mmuAsidTag = 1;
 #endif
 
 void MMU_init()
@@ -515,9 +531,15 @@ void MMU_init()
 	}
 	mmu_set_state();
 #ifdef FAST_MMU
-	// pre-fill kernel memory
-	for (u32 vpn = std::size(mmuAddressLUT) / 2; vpn < std::size(mmuAddressLUT); vpn++)
-		mmuAddressLUT[vpn] = vpn << 12;
+#if HOST_CPU == CPU_X64 && FEAT_SHREC == DYNAREC_JIT
+	mmuLutTagged = getenv("MMU_NO_ASIDLUT") == nullptr;
+#endif
+	if (!mmuLutTagged)
+	{
+		// pre-fill kernel memory (tagged mode fills all regions on demand)
+		for (u32 vpn = std::size(mmuAddressLUT) / 2; vpn < std::size(mmuAddressLUT); vpn++)
+			mmuAddressLUT[vpn] = vpn << 12;
+	}
 #endif
 }
 
@@ -629,5 +651,12 @@ void mmu_deserialize(Deserializer& deser)
 	deser.skip(64 * 4, Deserializer::V23); // ITLB_LRU_USE
 #ifdef FAST_MMU
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
+	if (mmuLutTagged)
+	{
+		// entries from the previous machine state are meaningless now
+		mmuAddressLUTFlush(true);
+		mmuAsidTag = CCN_PTEH.ASID + 1;
+	}
 #endif
 }

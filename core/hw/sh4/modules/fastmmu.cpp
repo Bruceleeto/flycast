@@ -72,6 +72,55 @@ void mmuStrictCacheFlush()
 	memset(strictCache, 0, sizeof(strictCache));
 }
 
+// Instruction-side translation cache for block dispatch (bm_GetCodeByVAddr).
+// The hardware ITLB has only 4 entries, so per-block instruction translation
+// thrashes it and falls back to full UTLB walks; together they dominate the
+// dispatch cost under full MMU. This direct-mapped, ASID-tagged, 1K-granular
+// cache remembers (vpage, asid) -> physical page. It holds translations only
+// (never code pointers), so block invalidation/SMC needs no hooks here: the
+// FPCB stays the single authority for vaddr->code. Flush whenever the match
+// set can change: UTLB/ITLB writes, MMUCR writes, TLB flush, deserialize.
+struct ITransCacheEntry
+{
+	u32 tag;		// bit 31 = valid | ASID << 22 | va >> 10; zero-init is empty
+	u32 pbase;		// physical page base (1K aligned)
+};
+constexpr u32 ITransCacheSize = 16384;	// 16MB of code working set at 1K pages
+static ITransCacheEntry iTransCache[ITransCacheSize];
+
+void mmuITransCacheFlush()
+{
+	memset(iTransCache, 0, sizeof(iTransCache));
+#if FEAT_SHREC != DYNAREC_NONE
+	// dispatch-cache entries bake in a translation, so they go stale together
+	extern void bm_DispatchCacheInvalidate();
+	bm_DispatchCacheInvalidate();
+#endif
+}
+
+MmuError mmu_instruction_translation_cached(u32 va, u32& rv)
+{
+	// MMU_NO_ITC: disable the cache for A/B measurements
+	static const bool disabled = getenv("MMU_NO_ITC") != nullptr;
+	if (disabled)
+		return mmu_instruction_translation(va, rv);
+	const u32 asid = CCN_PTEH.ASID;
+	const u32 tag = 0x80000000u | (asid << 22) | (va >> 10);
+	ITransCacheEntry& e = iTransCache[((va >> 10) ^ (asid << 5)) & (ITransCacheSize - 1)];
+	if (e.tag == tag)
+	{
+		rv = e.pbase | (va & 0x3FF);
+		return MmuError::NONE;
+	}
+	MmuError err = mmu_instruction_translation(va, rv);
+	if (err == MmuError::NONE)
+	{
+		e.tag = tag;
+		e.pbase = rv & ~0x3FFu;
+	}
+	return err;
+}
+
 struct TLB_LinkedEntry {
 	TLB_Entry entry;
 	TLB_LinkedEntry *next_entry;
@@ -214,11 +263,23 @@ int main(int argc, char *argv[])
 bool UTLB_Sync(u32 entry)
 {
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 	TLB_Entry& tlb_entry = UTLB[entry];
 	u32 sz = tlb_entry.Data.SZ1 * 2 + tlb_entry.Data.SZ0;
 
 	tlb_entry.Address.VPN &= mmu_mask[sz] >> 10;
 	tlb_entry.Data.PPN &= mmu_mask[sz] >> 10;
+
+	if (mmuLutTagged)
+	{
+		// The ASID-switch flush that used to bound LUT staleness is gone, so
+		// a (re)written or invalidated entry must drop the LUT entries for
+		// its page range (all UTLB write paths funnel through here,
+		// including associative invalidations and LDTLB).
+		static constexpr u32 lutPages[4] = { 1, 1, 16, 256 };	// 1K, 4K, 64K, 1MB
+		u32 first = (tlb_entry.Address.VPN << 10) >> 12;
+		memset(&mmuAddressLUT[first], 0, lutPages[sz] * sizeof(u32));
+	}
 
 	lru_entry = &tlb_entry;
 	lru_mask = mmu_mask[sz];
@@ -248,6 +309,7 @@ bool UTLB_Sync(u32 entry)
 
 void ITLB_Sync(u32 entry)
 {
+	mmuITransCacheFlush();
 }
 
 //Do a full lookup on the UTLB entry's
@@ -443,5 +505,6 @@ void mmu_flush_table()
 	flush_cache();
 	mmuAddressLUTFlush(true);
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 }
 #endif 	// FAST_MMU

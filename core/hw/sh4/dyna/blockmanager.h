@@ -69,6 +69,8 @@ struct RuntimeBlockInfo
 void bm_WriteBlockMap(const std::string& file);
 
 DynarecCodeEntryPtr DYNACALL bm_GetCodeByVAddr(u32 addr);
+// O(1) invalidation of the vaddr->code dispatch cache (block removal, TLB changes)
+void bm_DispatchCacheInvalidate();
 RuntimeBlockInfoPtr bm_GetBlock(void* dynarec_code);
 RuntimeBlockInfoPtr bm_GetStaleBlock(void* dynarec_code);
 RuntimeBlockInfoPtr DYNACALL bm_GetBlock(u32 addr);

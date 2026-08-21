@@ -86,6 +86,13 @@ static inline MmuError mmu_instruction_translation(u32 va, u32& rv)
 
 	return mmu_full_lookup(va, nullptr, rv);
 }
+
+// Block-dispatch wrapper with the ASID-tagged instruction translation cache
+// (see fastmmu.cpp). Cache translations only, never code pointers.
+MmuError mmu_instruction_translation_cached(u32 va, u32& rv);
+// Flush it whenever the match set can change: UTLB/ITLB writes, MMUCR
+// writes, TLB flush, deserialize.
+void mmuITransCacheFlush();
 #else
 MmuError mmu_instruction_translation(u32 va, u32& rv);
 #endif
@@ -119,10 +126,19 @@ template<typename T> void DYNACALL mmu_WriteMem(u32 adr, T data);
 void mmu_TranslateSQW(u32 adr, u32* out);
 
 #ifdef FAST_MMU
-// maps 4K virtual page number to physical address
+// maps 4K virtual page number to physical address.
+// When mmuLutTagged, an entry's low 12 bits (free in a 4K-aligned physical
+// address) hold ASID+1 of the translation's owner, and mmuAsidTag mirrors
+// the current PTEH.ASID+1. A lookup XORs the entry with mmuAsidTag: low 12
+// bits zero means valid-for-this-ASID, and the XOR has already cancelled the
+// tag so the result is directly the page base. ASID switches then just
+// update mmuAsidTag instead of wiping the 2MB table, keeping it warm across
+// the guest OS's process switches (WinCE does these constantly).
 extern u32 mmuAddressLUT[0x100000];
 extern u32 mmuLastPageMask;
 extern bool mmuStrict;
+extern bool mmuLutTagged;
+extern u32 mmuAsidTag;
 
 // Invalidate the strict-mode translation cache. Must be called whenever the
 // set of matching UTLB entries can change: UTLB writes, PTEH.ASID change,
@@ -131,7 +147,11 @@ void mmuStrictCacheFlush();
 
 static inline void mmuAddressLUTFlush(bool full)
 {
-	if (full)
+	if (mmuLutTagged)
+		// the whole table: tagged mode fills every region on demand,
+		// including TLB-mapped P3 pages in the upper half
+		memset(mmuAddressLUT, 0, sizeof(mmuAddressLUT));
+	else if (full)
 		memset(mmuAddressLUT, 0, sizeof(mmuAddressLUT) / 2);	// flush user memory
 	else
 	{
@@ -164,8 +184,15 @@ static inline u32 DYNACALL mmuDynarecLookup(u32 vaddr, u32 write, u32 pc)
 #ifdef FAST_MMU
 	// The LUT is 4K-granular, so a smaller page must not enter it, and a strict
 	// guest none at all: the inline lookup then misses and calls through here.
-	if (!mmuStrict && vaddr >> 31 == 0 && (mmuLastPageMask & 0xFFF) == 0)
-		mmuAddressLUT[vaddr >> 12] = paddr & ~0xfff;
+	if (!mmuStrict && (mmuLastPageMask & 0xFFF) == 0)
+	{
+		if (mmuLutTagged)
+			// all regions on demand (P1/P2/P4 identity included; kernel pages
+			// refill per ASID instead of being prefilled untagged)
+			mmuAddressLUT[vaddr >> 12] = (paddr & ~0xfffu) | mmuAsidTag;
+		else if (vaddr >> 31 == 0)
+			mmuAddressLUT[vaddr >> 12] = paddr & ~0xfff;
+	}
 #endif
 
 	return paddr;

@@ -30,7 +30,10 @@ static void CCN_PTEH_write(u32 addr, u32 value)
 #ifdef FAST_MMU
 	// Strict mode never populates the LUT and its own cache is ASID-tagged,
 	// so ASID switches (frequent on bleem) don't need any flush there.
-	if (temp.ASID != CCN_PTEH.ASID && !mmuStrict)
+	if (mmuLutTagged)
+		// tagged LUT entries carry their ASID: just retarget the tag
+		mmuAsidTag = temp.ASID + 1;
+	else if (temp.ASID != CCN_PTEH.ASID && !mmuStrict)
 		mmuAddressLUTFlush(true);
 #endif
 
@@ -55,6 +58,7 @@ static void CCN_MMUCR_write(u32 addr, u32 value)
 #ifdef FAST_MMU
 	// SV affects UTLB matching
 	mmuStrictCacheFlush();
+	mmuITransCacheFlush();
 #endif
 
 	if (mmu_changed_state)
