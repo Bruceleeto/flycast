@@ -76,8 +76,10 @@ MmuError mmu_full_SQ(u32 va, u32& rv);
 #ifdef FAST_MMU
 static inline MmuError mmu_instruction_translation(u32 va, u32& rv)
 {
-	if (fast_reg_lut[va >> 29] != 0)
+	if (fast_reg_lut[va >> 29] != 0 || CCN_MMUCR.AT == 0)
 	{
+		// AT == 0: MMU handlers stay installed across strict guests' AT-off
+		// windows, but the hardware does no translation
 		rv = va;
 		return MmuError::NONE;
 	}
