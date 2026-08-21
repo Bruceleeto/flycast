@@ -46,6 +46,32 @@ u32 mmuLastPageMask = 0xFFFFF000;
 // as a dispatch mechanism, emulation driven by TLB protection faults.
 bool mmuStrict = false;
 
+// Strict mode does a full 64-entry UTLB scan per translation, which dominates
+// runtime on strict guests. This direct-mapped cache, keyed on the 1K page,
+// remembers the outcome of a full scan: either the unique matching entry, or
+// that no entry matches (so the miss can be raised without rescanning).
+// A cached result stays valid until the match set can change, so it must be
+// flushed on UTLB writes, MMUCR writes and TLB flushes. The current ASID is
+// part of the tag, so ASID switches (which bleem does thousands of times a
+// second as a dispatch mechanism) need no flush. Entries are only cached when
+// MMUCR.SV == 0, which makes matching independent of sr.MD; MD flips on every
+// exception and can't be a flush trigger.
+struct StrictCacheEntry
+{
+	u32 tag;		// bit 31 = valid | ASID << 22 | va >> 10; zero-init is an empty cache
+	u32 mask;		// page mask of the matching entry
+	u32 ppnBase;	// (PPN << 10) & mask
+	u32 entryIdx;	// index into UTLB, or StrictMissIdx for a cached miss
+};
+constexpr u32 StrictMissIdx = ~0u;
+constexpr u32 StrictCacheSize = 4096;	// covers a 4MB working set at 1K pages
+static StrictCacheEntry strictCache[StrictCacheSize];
+
+void mmuStrictCacheFlush()
+{
+	memset(strictCache, 0, sizeof(strictCache));
+}
+
 struct TLB_LinkedEntry {
 	TLB_Entry entry;
 	TLB_LinkedEntry *next_entry;
@@ -187,6 +213,7 @@ int main(int argc, char *argv[])
 
 bool UTLB_Sync(u32 entry)
 {
+	mmuStrictCacheFlush();
 	TLB_Entry& tlb_entry = UTLB[entry];
 	u32 sz = tlb_entry.Data.SZ1 * 2 + tlb_entry.Data.SZ0;
 
@@ -228,7 +255,21 @@ MmuError mmu_full_lookup(u32 va, const TLB_Entry** tlb_entry_ret, u32& rv)
 {
 	if (mmuStrict)
 	{
-		// No LRU, no hash cache, no synthesized entries
+		const u32 asid = CCN_PTEH.ASID;
+		const u32 tag = 0x80000000u | (asid << 22) | (va >> 10);
+		StrictCacheEntry& cached = strictCache[((va >> 10) ^ (asid << 5)) & (StrictCacheSize - 1)];
+		if (cached.tag == tag)
+		{
+			if (cached.entryIdx == StrictMissIdx)
+				return MmuError::TLB_MISS;
+			rv = cached.ppnBase | (va & ~cached.mask);
+			lru_mask = cached.mask;
+			if (tlb_entry_ret != nullptr)
+				*tlb_entry_ret = &UTLB[cached.entryIdx];
+			return MmuError::NONE;
+		}
+
+		// No LRU, no synthesized entries
 		const TLB_Entry *match = nullptr;
 		for (const TLB_Entry& tlb_entry : UTLB)
 		{
@@ -242,8 +283,16 @@ MmuError mmu_full_lookup(u32 va, const TLB_Entry** tlb_entry_ret, u32& rv)
 			rv = ((tlb_entry.Data.PPN << 10) & mask) | (va & ~mask);
 			lru_mask = mask;
 		}
+		// With SV == 1, sr.MD affects matching and MD changes on every
+		// exception, so only cache when the result is MD-independent.
 		if (match == nullptr)
+		{
+			if (CCN_MMUCR.SV == 0)
+				cached = { tag, 0, 0, StrictMissIdx };
 			return MmuError::TLB_MISS;
+		}
+		if (CCN_MMUCR.SV == 0)
+			cached = { tag, lru_mask, rv & lru_mask, (u32)(match - &UTLB[0]) };
 		if (tlb_entry_ret != nullptr)
 			*tlb_entry_ret = match;
 		return MmuError::NONE;
@@ -384,5 +433,6 @@ void mmu_flush_table()
 	lru_entry = nullptr;
 	flush_cache();
 	mmuAddressLUTFlush(true);
+	mmuStrictCacheFlush();
 }
 #endif 	// FAST_MMU

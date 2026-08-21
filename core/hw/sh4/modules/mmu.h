@@ -122,6 +122,11 @@ extern u32 mmuAddressLUT[0x100000];
 extern u32 mmuLastPageMask;
 extern bool mmuStrict;
 
+// Invalidate the strict-mode translation cache. Must be called whenever the
+// set of matching UTLB entries can change: UTLB writes, PTEH.ASID change,
+// MMUCR writes (SV/TI), TLB flush, savestate load.
+void mmuStrictCacheFlush();
+
 static inline void mmuAddressLUTFlush(bool full)
 {
 	if (full)
