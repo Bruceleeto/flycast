@@ -818,30 +818,50 @@ private:
 			Xbyak::Label inCache;
 			Xbyak::Label done;
 
-			mov(eax, call_regs[0]);
-			shr(eax, 12);
-			if ((uintptr_t)mmuAddressLUT >> 32 != 0)
+			// strict guests never populate the LUT, so the inline check
+			// would always miss
+			if (!mmuStrict)
 			{
-				mov(r9, (uintptr_t)mmuAddressLUT);
-				mov(eax, dword[r9 + rax * 4]);
+				mov(eax, call_regs[0]);
+				shr(eax, 12);
+				if ((uintptr_t)mmuAddressLUT >> 32 != 0)
+				{
+					mov(r9, (uintptr_t)mmuAddressLUT);
+					mov(eax, dword[r9 + rax * 4]);
+				}
+				else
+				{
+					mov(eax, dword[(uintptr_t)mmuAddressLUT + rax * 4]);
+				}
+				if (mmuLutTagged)
+				{
+					// entry ^ current tag: low 12 bits zero = hit for this
+					// ASID, and the XOR already yielded the bare page base
+					mov(r9, (uintptr_t)&mmuAsidTag);
+					xor_(eax, dword[r9]);
+					test(eax, 0xFFF);
+					je(inCache);
+				}
+				else
+				{
+					test(eax, eax);
+					jne(inCache);
+				}
 			}
-			else
-			{
-				mov(eax, dword[(uintptr_t)mmuAddressLUT + rax * 4]);
-			}
-			test(eax, eax);
-			jne(inCache);
 #endif
 			mov(call_regs[1], write);
 			mov(call_regs[2], block->vaddr + op.guest_offs - (op.delay_slot ? 2 : 0));	// pc
 			GenCall(mmuDynarecLookup);
 			mov(call_regs[0], eax);
 #ifdef FAST_MMU
-			jmp(done);
-			L(inCache);
-			and_(call_regs[0], 0xFFF);
-			or_(call_regs[0], eax);
-			L(done);
+			if (!mmuStrict)
+			{
+				jmp(done);
+				L(inCache);
+				and_(call_regs[0], 0xFFF);
+				or_(call_regs[0], eax);
+				L(done);
+			}
 #endif
 		}
 	}

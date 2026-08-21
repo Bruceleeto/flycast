@@ -489,12 +489,22 @@ void mmu_set_state()
 		mmuOn = false;
 	}
 
+#ifdef FAST_MMU
+	// keep the tag in sync wherever PTEH may have changed without a write
+	// (reset, deserialize): a desynced tag would let another ASID's entries hit
+	mmuAsidTag = CCN_PTEH.ASID + 1;
+#endif
+
 	SetMemoryHandlers();
 	setSqwHandler();
 }
 
 #ifdef FAST_MMU
 u32 mmuAddressLUT[0x100000];
+// see mmu.h. Tagged mode needs the backend's inline lookup to check the tag,
+// only implemented in rec-x64 so far.
+bool mmuLutTagged;
+u32 mmuAsidTag = 1;
 #endif
 
 void MMU_init()
@@ -515,9 +525,15 @@ void MMU_init()
 	}
 	mmu_set_state();
 #ifdef FAST_MMU
-	// pre-fill kernel memory
-	for (u32 vpn = std::size(mmuAddressLUT) / 2; vpn < std::size(mmuAddressLUT); vpn++)
-		mmuAddressLUT[vpn] = vpn << 12;
+#if HOST_CPU == CPU_X64 && FEAT_SHREC == DYNAREC_JIT
+	mmuLutTagged = true;
+#endif
+	if (!mmuLutTagged)
+	{
+		// pre-fill kernel memory (tagged mode fills all regions on demand)
+		for (u32 vpn = std::size(mmuAddressLUT) / 2; vpn < std::size(mmuAddressLUT); vpn++)
+			mmuAddressLUT[vpn] = vpn << 12;
+	}
 #endif
 }
 
@@ -629,5 +645,11 @@ void mmu_deserialize(Deserializer& deser)
 	deser.skip(64 * 4, Deserializer::V23); // ITLB_LRU_USE
 #ifdef FAST_MMU
 	mmuStrictCacheFlush();
+	if (mmuLutTagged)
+	{
+		// entries from the previous machine state are meaningless now
+		mmuAddressLUTFlush(true);
+		mmuAsidTag = CCN_PTEH.ASID + 1;
+	}
 #endif
 }

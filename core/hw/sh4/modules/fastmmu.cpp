@@ -220,6 +220,19 @@ bool UTLB_Sync(u32 entry)
 	tlb_entry.Address.VPN &= mmu_mask[sz] >> 10;
 	tlb_entry.Data.PPN &= mmu_mask[sz] >> 10;
 
+	if (mmuLutTagged)
+	{
+		// The ASID-switch flush that used to bound LUT staleness is gone, so
+		// a (re)written or invalidated entry must drop the LUT entries for
+		// its page range (all UTLB write paths funnel through here,
+		// including associative invalidations and LDTLB).
+		static constexpr u32 lutPages[4] = { 1, 1, 16, 256 };	// 1K, 4K, 64K, 1MB
+		// cast first: the bitfield promotes to int, so a VPN in the upper
+		// half would shift into the sign bit and >> would extend it
+		u32 first = ((u32)tlb_entry.Address.VPN << 10) >> 12;
+		memset(&mmuAddressLUT[first], 0, lutPages[sz] * sizeof(u32));
+	}
+
 	lru_entry = &tlb_entry;
 	lru_mask = mmu_mask[sz];
 	lru_address = tlb_entry.Address.VPN << 10;
