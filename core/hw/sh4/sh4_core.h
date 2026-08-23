@@ -4,6 +4,7 @@
 #include <cmath>
 
 int UpdateSystem_INTC();
+int UpdateSystem_INTC_Sleep();
 bool UpdateSR();
 void setDefaultRoundingMode();
 

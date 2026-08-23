@@ -87,6 +87,7 @@ inline static void InterruptMask(InterruptID intr, bool v)
 }
 
 int UpdateINTC();
+int UpdateINTCSleep();
 
 void Do_Exception(u32 epc, Sh4ExceptionCode expEvn);
 

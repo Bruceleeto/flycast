@@ -716,7 +716,11 @@ static void gd_process_spi_cmd()
 		packet_cmd.data_8[6], packet_cmd.data_8[7], packet_cmd.data_8[8], packet_cmd.data_8[9], packet_cmd.data_8[10], packet_cmd.data_8[11] );
 
 	if (sns_key == 0x0 			// No sense
-			|| sns_key == 0xB)	// Aborted
+			|| sns_key == 0xB	// Aborted
+			// an illegal request is reported on the command that caused it
+			// and not on the next one, or a guest that probes for an
+			// unsupported feature could never recover
+			|| sns_key == 5)	// Illegal request
 		GDStatus.CHECK=0;
 	else
 		GDStatus.CHECK=1;
@@ -782,10 +786,26 @@ static void gd_process_spi_cmd()
 		{
 			printf_spicmd("SPI_GET_TOC");
 			//printf("SPI_GET_TOC - %d\n",(packet_cmd.data_8[4]) | (packet_cmd.data_8[3]<<8) );
+			const DiskArea area = (DiskArea)(packet_cmd.data_8[1] & 1);
+			if (area == DoubleDensity && libGDR_GetDiscType() != GdRom)
+			{
+				// A CD has no high-density area. The drive rejects the request
+				// rather than returning an empty TOC, and that is how a guest
+				// tells a GD-ROM from a CD: Linux's gdrom driver reads the DD
+				// TOC first and falls back to the SD one when it fails, so
+				// answering here left it parsing an all-FF TOC and picking a
+				// bogus session offset.
+				GDStatus.CHECK = 1;
+				sns_key = 5;	// Illegal request
+				sns_asc = 0x24;	// Invalid field in command packet
+				sns_ascq = 0;
+				gd_set_state(gds_procpacketdone);
+				break;
+			}
 			u32 toc_gd[102];
 			
 			//toc - dd/sd
-			libGDR_GetToc(&toc_gd[0], (DiskArea)(packet_cmd.data_8[1] & 1));
+			libGDR_GetToc(&toc_gd[0], area);
 			 
 			gd_spi_pio_end((u8*)&toc_gd[0], std::min((u32)packet_cmd.data_8[4] | (packet_cmd.data_8[3] << 8), (u32)sizeof(toc_gd)));
 		}

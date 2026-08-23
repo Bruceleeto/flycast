@@ -251,6 +251,15 @@ MmuError mmu_full_lookup(u32 va, const TLB_Entry** tlb_entry_ret, u32& rv)
 {
 	if (mmuStrict)
 	{
+		// URC is the hardware's random replacement counter: it advances on every
+		// UTLB access and selects the entry LDTLB overwrites. Without this it
+		// stays put and the guest keeps reloading a single UTLB entry, which
+		// livelocks any OS that demand-fills the TLB (an instruction fetch and a
+		// data access on different pages evict each other forever).
+		CCN_MMUCR.URC++;
+		if (CCN_MMUCR.URB == CCN_MMUCR.URC)
+			CCN_MMUCR.URC = 0;
+
 		const u32 asid = CCN_PTEH.ASID;
 		const u32 tag = 0x80000000u | (asid << 22) | (va >> 10);
 		StrictCacheEntry& cached = strictCache[((va >> 10) ^ (asid << 5)) & (StrictCacheSize - 1)];

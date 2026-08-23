@@ -962,7 +962,7 @@ sh4op(i0000_0000_0001_1011)
 	//just wait for an Interrupt
 	int i = 0, s = 1;
 
-	while (!UpdateSystem_INTC())//448
+	while (!UpdateSystem_INTC_Sleep())//448
 	{
 		if (i++>1000)
 		{

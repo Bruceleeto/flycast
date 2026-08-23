@@ -485,6 +485,28 @@ void mmu_set_state()
 				NOTICE_LOG(SH4, "Enabling Full MMU support (UTLB loaded before AT, strict TLB)");
 			}
 		}
+		else if (!mmuOn)
+		{
+			// Empty UTLB at AT time: the guest demand-fills it from TLB-miss
+			// exceptions, which is what an OS kernel does (Linux) and what
+			// neither check above detects. Take the strict path: no LRU, no hash
+			// cache, no synthesized entries.
+			// FIXME: this fires for any guest that sets AT with an empty UTLB,
+			// including titles that only ever wanted store-queue remapping. It
+			// needs a real detection heuristic before it can be trusted.
+			mmuOn = true;
+#ifdef FAST_MMU
+			mmuStrict = true;
+			mmuAddressLUTFlush(true);
+			mmuStrictCacheFlush();
+#endif
+			static bool logged;
+			if (!logged)
+			{
+				logged = true;
+				NOTICE_LOG(SH4, "Enabling Full MMU support (forced, strict TLB)");
+			}
+		}
 	}
 	else
 	{
@@ -522,9 +544,15 @@ void MMU_init()
 	}
 	mmu_set_state();
 #ifdef FAST_MMU
-	// pre-fill kernel memory
+	// Pre-fill kernel memory. Only P1, P2 and P4 go untranslated: P3
+	// (C0000000-DFFFFFFF) goes through the TLB like P0/U0 does, so it must miss
+	// the LUT and take the full lookup. Identity-mapping it here sent every P3
+	// access straight to the matching 29-bit physical address.
 	for (u32 vpn = std::size(mmuAddressLUT) / 2; vpn < std::size(mmuAddressLUT); vpn++)
-		mmuAddressLUT[vpn] = vpn << 12;
+	{
+		const u32 va = vpn << 12;
+		mmuAddressLUT[vpn] = fast_reg_lut[va >> 29] != 0 ? va : 0;
+	}
 #endif
 }
 

@@ -159,6 +159,20 @@ int UpdateINTC()
 	return 1;
 }
 
+// Sleep mode variant. The SH4 accepts an interrupt request while in sleep mode
+// even when SR.BL is set, so SR.BL must not gate the wake-up here. Linux's
+// default_idle() depends on this: it does set_bl_bit() then sleep, and only
+// clears BL after the sleep returns.
+int UpdateINTCSleep()
+{
+	const u32 pend = interrupt_vpend & interrupt_vmask & ~InterruptLevelBit[Sh4cntx.sr.IMASK];
+	if (!pend)
+		return 0;
+
+	Do_Interrupt(InterruptEnvId[bitscanrev(pend)]);
+	return 1;
+}
+
 void SetInterruptPend(InterruptID intr)
 {
 	interrupt_vpend |= InterruptBit[intr];

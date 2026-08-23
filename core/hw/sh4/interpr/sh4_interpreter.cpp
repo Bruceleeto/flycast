@@ -183,6 +183,15 @@ int UpdateSystem_INTC()
 		return 0;
 }
 
+// Same, but for the sleep instruction: SR.BL does not inhibit the wake-up.
+int UpdateSystem_INTC_Sleep()
+{
+	Sh4cntx.sh4_sched_next -= SH4_TIMESLICE;
+	if (Sh4cntx.sh4_sched_next < 0)
+		sh4_sched_tick(SH4_TIMESLICE);
+	return UpdateINTCSleep();
+}
+
 void Sh4Interpreter::Init()
 {
 	ctx = &p_sh4rcb->cntx;
