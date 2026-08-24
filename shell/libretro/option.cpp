@@ -108,6 +108,20 @@ Option<bool> OpenGlChecks("", false);
 Option<bool> FastGDRomLoad(CORE_OPTION_NAME "_gdrom_fast_loading", false);
 Option<bool> RamMod32MB(CORE_OPTION_NAME "_dc_32mb_mod", false);
 
+// Guest SH4 cache and pipeline simulation. A developer tool driven by command
+// line switches in the standalone build, which libretro has no equivalent of,
+// so these exist only so the core links: they are not exposed as core options
+// and stay at their defaults, which is off and costing nothing.
+Option<bool> CacheSim("", false);
+Option<std::string, false> CacheSimReport("");
+Option<int> CacheSimLookahead("", 0);
+Option<int> CacheSimSkipFrames("", 0);
+Option<int> CacheSimFrames("", 0);
+Option<std::string, false> CacheSimTrace("");
+Option<std::string, false> CacheSimSymbols("");
+Option<bool> CacheSimData("", false);
+Option<bool> CacheSimTiming("", false);
+
 //Option<std::vector<std::string>, false> ContentPath("");
 //Option<bool, false> HideLegacyNaomiRoms("", true);
 

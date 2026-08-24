@@ -182,7 +182,9 @@ void logBlocks(size_t limit)
 		double cycles;
 		double sqCycles;
 		u32 pipeCycles;
-		u16 flowDep, resource, stage;
+		// u32 rather than u16: `stage` is the sum of two counters, and the
+		// addition promotes to int before it is stored
+		u32 flowDep, resource, stage;
 		bool modelled;
 	};
 	std::vector<Row> rows;
@@ -197,8 +199,8 @@ void logBlocks(size_t limit)
 				b.pipeCycles,
 				b.pipeByReason[(int)pipesim::StallReason::FlowDep],
 				b.pipeByReason[(int)pipesim::StallReason::ResourceHazard],
-				b.pipeByReason[(int)pipesim::StallReason::StageFull]
-						+ b.pipeByReason[(int)pipesim::StallReason::StageLocked],
+				(u32)(b.pipeByReason[(int)pipesim::StallReason::StageFull]
+						+ b.pipeByReason[(int)pipesim::StallReason::StageLocked]),
 				b.pipeModelled });
 	}
 	if (rows.empty())
