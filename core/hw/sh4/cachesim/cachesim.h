@@ -64,6 +64,12 @@ inline bool armed() { return g_armed; }
 // cache answers most questions on its own.
 extern bool g_dataFeed;
 inline bool dataFeed() { return g_dataFeed; }
+// Whether modelled miss cycles are charged to flycast's own timing. This makes
+// the simulator change the emulation instead of only observing it: a run with
+// it on is a different run, and nothing measured there is comparable with a
+// run without it.
+extern bool g_timing;
+inline bool timingFeedback() { return g_timing; }
 // Applies the config options. Must run before any block is translated.
 void init();
 // Only takes effect for blocks compiled afterwards, so the caller must reset
@@ -92,6 +98,9 @@ void setSkipFrames(u32 frames);
 void setMeasureFrames(u32 frames);
 // True once the measurement window has closed. The headless loop ends the run.
 bool finished();
+// Guest cycles actually charged to the emulated SH4 by the feedback mode. Zero
+// when it is off, which is how a report says "this run was only observed".
+u64 chargedTimingCycles();
 
 //
 // Feeds

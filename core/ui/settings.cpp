@@ -115,6 +115,11 @@ static void gui_settings_advanced()
 					T("Also model the data cache. Every guest load and store is fed to the"
 					  " model, which costs considerably more speed than the instruction"
 					  " cache alone"));
+			OptionCheckbox(T("Charge Misses to Emulated Timing"), config::CacheSimTiming,
+					T("Slow the emulated SH4 by the modelled cache stalls. This changes how"
+					  " the game runs rather than only measuring it, and the modelled"
+					  " penalty is an estimate, so leave it off unless that is the"
+					  " experiment"));
 		}
 		ImGui::Unindent();
         OptionCheckbox(T("Dump Textures"), config::DumpTextures,

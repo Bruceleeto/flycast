@@ -55,6 +55,10 @@ static void usage(const char *exe)
 	fprintf(stderr, "                               startup storm and measure steady state.\n");
 	fprintf(stderr, "-cachesim-lookahead n          bytes fetched past the end of a block (default 0).\n");
 	fprintf(stderr, "                               Calibrated against hardware, see docs/cachesim.\n");
+	fprintf(stderr, "-cachesim-timing               charge modelled miss cycles to the emulated SH4.\n");
+	fprintf(stderr, "                               Changes how the guest runs, so results from such\n");
+	fprintf(stderr, "                               a run are not comparable with a normal one.\n");
+	fprintf(stderr, "                               Implies -cachesim.\n");
 	fprintf(stderr, "-cachesim-data                 also model the operand cache. Costs a call per\n");
 	fprintf(stderr, "                               guest load and store, so it is off by default.\n");
 	fprintf(stderr, "                               Implies -cachesim.\n");
@@ -260,6 +264,11 @@ void parseCommandLine(int argc, const char * const argv[])
 		}
 		if (!strcmp(argv[i], "-cachesim") || !strcmp(argv[i], "--cachesim")) {
 			setTransient("config", "Debug.CacheSim", "yes");
+			continue;
+		}
+		if (!strcmp(argv[i], "-cachesim-timing") || !strcmp(argv[i], "--cachesim-timing")) {
+			setTransient("config", "Debug.CacheSim", "yes");
+			setTransient("config", "Debug.CacheSimTiming", "yes");
 			continue;
 		}
 		if (!strcmp(argv[i], "-cachesim-data") || !strcmp(argv[i], "--cachesim-data")) {

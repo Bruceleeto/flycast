@@ -147,6 +147,9 @@ Option<std::string, false> CacheSimSymbols("Debug.CacheSimSymbols");
 // Off by default: a call per guest load and store is not something to pay for
 // unless the data cache is what is being looked at.
 Option<bool> CacheSimData("Debug.CacheSimData", false);
+// Changes emulated behaviour rather than only observing it, so it stays off
+// unless somebody asks for it by name.
+Option<bool> CacheSimTiming("Debug.CacheSimTiming", false);
 
 Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 

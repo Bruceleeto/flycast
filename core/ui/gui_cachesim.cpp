@@ -78,6 +78,11 @@ void drawCacheSimPanel()
 								/ frame.misses[data]);
 	else
 		ImGui::TextDisabled("ocache: not measured");
+	if (cachesim::timingFeedback())
+		// This one changes the game rather than measuring it, so it says so
+		// where the numbers are, not only in a log line at startup
+		ImGui::TextColored(ImVec4(1.f, 0.7f, 0.2f, 1.f),
+				"charging miss cycles to guest timing: this run is not a normal run");
 	if (!cachesim::symbolsLoaded())
 		ImGui::TextDisabled("no symbols: rows are address ranges");
 

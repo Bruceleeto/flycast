@@ -159,6 +159,17 @@ bool writeReport(const std::string& path)
 			cycles == 0 ? 0.0 : c.missCycles[inst] / cycles);
 	fprintf(f, "  },\n");
 
+	fprintf(f, "  \"timing_feedback\": {\n");
+	fprintf(f, "    \"enabled\": %s,\n", timingFeedback() ? "true" : "false");
+	fprintf(f, "    \"charged_cycles\": %" PRIu64 ",\n", chargedTimingCycles());
+	// The share of the run that the model added to the guest's own time. With
+	// the mode off this is zero and the run is an observation; with it on, the
+	// guest did less work per frame than it otherwise would have, and no number
+	// from this run is comparable with one from a run without it.
+	fprintf(f, "    \"charged_fraction\": %.6f\n",
+			cycles == 0 ? 0.0 : (double)chargedTimingCycles() / cycles);
+	fprintf(f, "  },\n");
+
 	// Operand cache. Present whether or not the feed was on: all zeroes says
 	// "not measured", and a reader that cannot tell the difference between
 	// "no misses" and "not looked at" would draw the wrong conclusion from a

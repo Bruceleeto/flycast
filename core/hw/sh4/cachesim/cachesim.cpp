@@ -35,6 +35,9 @@ bool g_armed = false;
 // Read at block compile time, so it must not change without the code cache
 // being thrown away with it.
 bool g_dataFeed = false;
+// Charging modelled miss cycles to flycast's own timing changes what the guest
+// does, so it is a separate switch from measuring, and off unless asked for.
+bool g_timing = false;
 static std::string reportPath;
 
 struct State
@@ -84,6 +87,11 @@ struct State
 	// silently dropped: a feed that quietly loses accesses reads as a guest
 	// that makes fewer of them.
 	u64 dataTranslationFailures = 0;
+	// Miss cycles are fractional - the penalty is 16.8, not 17 - and the SH4
+	// cycle counter is an integer. The remainder is carried rather than
+	// truncated, which over a frame is the difference between 16.8 and 16.
+	double chargeRemainder = 0;
+	u64 chargedCycles = 0;
 	double smoothedFrameCycles = 0;
 
 	u32 lookahead = 0;
@@ -97,6 +105,22 @@ static State& state()
 {
 	static State st;
 	return st;
+}
+
+// Charges modelled stall cycles to the emulated SH4. Taken from the model's own
+// cycle accumulator rather than from a miss count times a constant, so whatever
+// penalty model is configured is the one that gets charged.
+static void chargeCycles(State& st, double cycles)
+{
+	if (!g_timing || cycles <= 0)
+		return;
+	st.chargeRemainder += cycles;
+	const int whole = (int)st.chargeRemainder;
+	if (whole <= 0)
+		return;
+	st.chargeRemainder -= whole;
+	st.chargedCycles += whole;
+	Sh4cntx.cycle_counter -= whole;
 }
 
 //
@@ -188,8 +212,13 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 	// Misses are attributed to the block that was fetching when they happened,
 	// which is what makes them addable to a per-function cost
 	const u64 before = st.model.counters().misses[(int)Stream::Inst];
+	const double cyclesBefore = st.model.counters().missCycles[(int)Stream::Inst];
 	fetchRange(bt->vaddr, bt->paddr, bt->size, bt->vaddr, st.lookahead);
 	st.missCount[bt->id] += st.model.counters().misses[(int)Stream::Inst] - before;
+	// Charged at block entry rather than spread across the block: the feed
+	// replays the whole fetch stream in one call, so there is no finer moment
+	// to attribute it to
+	chargeCycles(st, st.model.counters().missCycles[(int)Stream::Inst] - cyclesBefore);
 }
 
 //
@@ -240,6 +269,7 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 	const bool oix = CCN_CCR.OIX;
 	const bool ora = CCN_CCR.ORA;
 	const u64 before = model.counters().misses[(int)Stream::Data];
+	const double cyclesBefore = model.counters().missCycles[(int)Stream::Data];
 
 	// An access can straddle a line, and under an MMU the second line can live
 	// on a different page, so it is translated rather than extrapolated.
@@ -274,6 +304,7 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 	if (st.currentBlock < st.dataMissCount.size())
 		st.dataMissCount[st.currentBlock] +=
 				model.counters().misses[(int)Stream::Data] - before;
+	chargeCycles(st, model.counters().missCycles[(int)Stream::Data] - cyclesBefore);
 }
 
 void traceFetch(u32 vaddr, u32 paddr, u32 bytes)
@@ -368,6 +399,10 @@ void frameBoundary()
 	// Picks up the setting being toggled from the GUI while a game runs. The
 	// hook only exists in blocks compiled while armed, so the code cache has to
 	// go with it.
+	// Timing feedback is a plain runtime check inside a hook that already
+	// exists, so it can be toggled without recompiling anything
+	g_timing = g_armed && config::CacheSimTiming;
+
 	if (config::CacheSim != g_armed || (g_armed && config::CacheSimData != g_dataFeed))
 	{
 		g_dataFeed = config::CacheSimData;
@@ -386,6 +421,13 @@ void init()
 {
 	reportPath = config::CacheSimReport;
 	g_dataFeed = config::CacheSimData;
+	g_timing = config::CacheSim && config::CacheSimTiming;
+	if (g_timing)
+		// Loud, because from here on flycast is not emulating the same machine
+		// it emulates with the option off, and any timing-sensitive result
+		// taken from this run has to be read with that in mind
+		NOTICE_LOG(SH4, "cachesim: charging modelled miss cycles to guest timing."
+				" The guest will run differently than with this off.");
 	setBlockLookahead(config::CacheSimLookahead);
 	setSkipFrames(config::CacheSimSkipFrames);
 	setMeasureFrames(config::CacheSimFrames);
@@ -425,7 +467,12 @@ void reset()
 	st.model.reset();
 	st.frames = 0;
 	st.totalCycles = 0;
-	st.lastSchedCycles = 0;
+	// The scheduler clock does not restart with us. Zeroing this instead of
+	// sampling it makes the next frame boundary charge everything that happened
+	// before the reset to a single frame, which silently inflates the guest
+	// cycle denominator of every rate in the report - by a factor of six on a
+	// run that skips 1500 frames and measures 300.
+	st.lastSchedCycles = sh4_sched_now64();
 	st.frameCycles = 0;
 	st.frameStart = Counters{};
 	st.lastLog = Counters{};
@@ -441,6 +488,8 @@ void reset()
 	std::fill(st.dataMissAtFrame.begin(), st.dataMissAtFrame.end(), 0);
 	std::fill(st.dataMissPerFrame.begin(), st.dataMissPerFrame.end(), 0.0);
 	st.dataTranslationFailures = 0;
+	st.chargeRemainder = 0;
+	st.chargedCycles = 0;
 	st.smoothedFrameCycles = 0;
 }
 
@@ -458,6 +507,7 @@ u32 blockLookahead() { return state().lookahead; }
 void setSkipFrames(u32 frames) { state().skipFrames = frames; }
 void setMeasureFrames(u32 frames) { state().measureFrames = frames; }
 bool finished() { return state().done; }
+u64 chargedTimingCycles() { return state().chargedCycles; }
 void setMissRingSize(size_t records) { state().model.setMissRingSize(records); }
 void setReportPath(const std::string& path) { reportPath = path; }
 
