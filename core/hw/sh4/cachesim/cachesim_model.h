@@ -140,6 +140,19 @@ struct SiteStat
 	u64 kinds[(int)MissKind::Count];
 };
 
+// FNV-1a. The identity of a block of guest code: code living in a JIT buffer
+// lands at a different address every run, so its address can be used for layout
+// arithmetic but never for naming it or matching it against a binary. Shared so
+// that the live feed and anything checking a symbol file against a trace agree
+// on what a block's identity is.
+inline u64 hashCode(const u8 *bytes, size_t size)
+{
+	u64 hash = 0xcbf29ce484222325ull;
+	for (size_t i = 0; i < size; i++)
+		hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+	return hash;
+}
+
 //
 // Fully-associative LRU shadow of the same capacity as the modelled cache.
 // A direct-mapped miss that hits here is a conflict miss: the line was still

@@ -143,6 +143,7 @@ Option<int> CacheSimLookahead("Debug.CacheSimLookahead", 0);
 Option<int> CacheSimSkipFrames("Debug.CacheSimSkipFrames", 0);
 Option<int> CacheSimFrames("Debug.CacheSimFrames", 0);
 Option<std::string, false> CacheSimTrace("Debug.CacheSimTrace");
+Option<std::string, false> CacheSimSymbols("Debug.CacheSimSymbols");
 
 Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 

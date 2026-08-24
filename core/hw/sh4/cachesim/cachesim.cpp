@@ -17,6 +17,7 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
 #include "cachesim.h"
+#include "cachesim_symbols.h"
 
 #include "cfg/option.h"
 #include "emulator.h"
@@ -53,6 +54,20 @@ struct State
 
 	std::deque<BlockTrace> blockPool;
 	std::unordered_map<u64, u32> blockLookup;
+
+	// Per-block execution and miss counts, indexed by block id. Kept as a
+	// cumulative count plus a snapshot at the last frame, because the only
+	// useful view is per frame: a total over a run is mostly loading and
+	// compilation and describes no frame that ever happened.
+	std::vector<u64> execCount;
+	std::vector<u64> execAtFrame;
+	std::vector<u64> missCount;
+	std::vector<u64> missAtFrame;
+	// Exponentially smoothed per-frame rates, so the panel is readable rather
+	// than flickering with whatever one frame happened to do
+	std::vector<double> execPerFrame;
+	std::vector<double> missPerFrame;
+	double smoothedFrameCycles = 0;
 
 	u32 lookahead = 0;
 	u32 skipFrames = 0;
@@ -135,7 +150,24 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 	st.model.setCycle(st.totalCycles + (sh4_sched_now64() - st.lastSchedCycles));
 	if (tracing())
 		traceBlockExec(bt, st.model.currentCycle());
+
+	if (bt->id >= st.execCount.size())
+	{
+		const size_t size = bt->id + 1;
+		st.execCount.resize(size, 0);
+		st.execAtFrame.resize(size, 0);
+		st.missCount.resize(size, 0);
+		st.missAtFrame.resize(size, 0);
+		st.execPerFrame.resize(size, 0.0);
+		st.missPerFrame.resize(size, 0.0);
+	}
+	st.execCount[bt->id]++;
+
+	// Misses are attributed to the block that was fetching when they happened,
+	// which is what makes them addable to a per-function cost
+	const u64 before = st.model.counters().misses[(int)Stream::Inst];
 	fetchRange(bt->vaddr, bt->paddr, bt->size, bt->vaddr, st.lookahead);
+	st.missCount[bt->id] += st.model.counters().misses[(int)Stream::Inst] - before;
 }
 
 void traceFetch(u32 vaddr, u32 paddr, u32 bytes)
@@ -184,6 +216,20 @@ void frameBoundary()
 	if (tracing())
 		traceEvent(3, 0, 0);
 
+	// Per-frame rates, smoothed. A frame is the only window that means
+	// anything here, and one frame on its own is too noisy to read.
+	constexpr double alpha = 0.1;
+	for (size_t i = 0; i < st.execCount.size(); i++)
+	{
+		const double execs = (double)(st.execCount[i] - st.execAtFrame[i]);
+		const double misses = (double)(st.missCount[i] - st.missAtFrame[i]);
+		st.execAtFrame[i] = st.execCount[i];
+		st.missAtFrame[i] = st.missCount[i];
+		st.execPerFrame[i] += alpha * (execs - st.execPerFrame[i]);
+		st.missPerFrame[i] += alpha * (misses - st.missPerFrame[i]);
+	}
+	st.smoothedFrameCycles += alpha * ((double)st.frameCycles - st.smoothedFrameCycles);
+
 	if (st.skipFrames != 0 && !st.skipped && st.frames >= st.skipFrames)
 	{
 		// Startup is not steady state: drop everything measured so far
@@ -224,6 +270,17 @@ void init()
 	setSkipFrames(config::CacheSimSkipFrames);
 	setMeasureFrames(config::CacheSimFrames);
 	setArmed(config::CacheSim);
+	if (g_armed)
+	{
+		// A disc image has no symbols of its own, so an explicit ELF wins and
+		// otherwise one sitting beside the content is used. Either way it is
+		// checked against the code that actually ran before any name is shown.
+		const std::string explicitPath = config::CacheSimSymbols;
+		if (!explicitPath.empty())
+			loadSymbols(explicitPath);
+		else
+			discoverSymbols(settings.content.path);
+	}
 	// The trace is opened when the warm-up ends, not here: recording the boot
 	// and compile storm would multiply the file size for a phase nobody wants
 	// to sweep over
@@ -254,6 +311,13 @@ void reset()
 	st.lastLog = Counters{};
 	st.lastLogCycles = 0;
 	st.skipped = false;
+	std::fill(st.execCount.begin(), st.execCount.end(), 0);
+	std::fill(st.execAtFrame.begin(), st.execAtFrame.end(), 0);
+	std::fill(st.missCount.begin(), st.missCount.end(), 0);
+	std::fill(st.missAtFrame.begin(), st.missAtFrame.end(), 0);
+	std::fill(st.execPerFrame.begin(), st.execPerFrame.end(), 0.0);
+	std::fill(st.missPerFrame.begin(), st.missPerFrame.end(), 0.0);
+	st.smoothedFrameCycles = 0;
 }
 
 void term()
@@ -276,23 +340,20 @@ void setReportPath(const std::string& path) { reportPath = path; }
 //
 // Block pool
 //
-// FNV-1a over the guest instruction bytes. This is the identity of a block:
-// code living in a guest JIT buffer lands at a different address every run, so
-// its address can be used for layout arithmetic but never for naming it or
-// diffing it against another run.
 static u64 hashGuestCode(u32 paddr, u32 size)
 {
-	u64 hash = 0xcbf29ce484222325ull;
 	const u8 *mem = GetMemPtr(paddr, size);
+	if (mem != nullptr)
+		return hashCode(mem, size);
+	// Not directly mapped: copy it out so the hash is computed over the same
+	// bytes, by the same function, as anything checking a binary against it
+	std::vector<u8> bytes(size);
 	for (u32 i = 0; i < size; i++)
-	{
-		const u8 byte = mem != nullptr ? mem[i] : (u8)addrspace::read8(paddr + i);
-		hash = (hash ^ byte) * 0x100000001b3ull;
-	}
-	return hash;
+		bytes[i] = (u8)addrspace::read8(paddr + i);
+	return hashCode(bytes.data(), size);
 }
 
-const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size)
+const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles)
 {
 	State& st = state();
 	const u64 hash = hashGuestCode(paddr, size);
@@ -310,7 +371,7 @@ const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size)
 	}
 	// std::deque so that the raw pointers baked into compiled code stay valid
 	// as the pool grows
-	st.blockPool.push_back({ vaddr, paddr, size, (u32)st.blockPool.size(), hash });
+	st.blockPool.push_back({ vaddr, paddr, size, (u32)st.blockPool.size(), guestCycles, hash });
 	return &st.blockPool.back();
 }
 
@@ -376,6 +437,73 @@ std::vector<SiteStat> topSites(Stream stream, size_t limit)
 std::vector<MissRecord> recentMisses()
 {
 	return state().model.recentMisses();
+}
+
+//
+// Profile
+//
+double profileFrameCycles()
+{
+	return state().smoothedFrameCycles;
+}
+
+double profileAccountedCycles()
+{
+	const State& st = state();
+	double total = 0;
+	for (size_t i = 0; i < st.execPerFrame.size(); i++)
+		total += st.execPerFrame[i] * st.blockPool[i].guestCycles;
+	return total;
+}
+
+std::vector<ProfileRow> profile(size_t limit)
+{
+	const State& st = state();
+	const double cyclesPerMiss = st.model.penalty().fixedCycles;
+
+	// Group by symbol where there is one. Everything else is generated code or
+	// a binary with no symbols, and gets grouped by the region it lives in:
+	// naming it after the nearest symbol would be a guess presented as a fact.
+	std::unordered_map<std::string, ProfileRow> rows;
+	for (size_t i = 0; i < st.execPerFrame.size(); i++)
+	{
+		if (st.execPerFrame[i] < 0.01)
+			continue;
+		const BlockTrace& block = st.blockPool[i];
+		const char *symbol = symbolsLoaded() ? symbolFor(block.vaddr) : nullptr;
+
+		char label[64];
+		if (symbol == nullptr)
+			// 64 KB granularity: enough to separate a JIT buffer from a loader
+			// from static code, without inventing detail we do not have
+			std::snprintf(label, sizeof(label), "%08x-%08x",
+					block.vaddr & ~0xffffu, (block.vaddr & ~0xffffu) + 0x10000);
+
+		ProfileRow& row = rows[symbol != nullptr ? symbol : label];
+		if (row.name.empty())
+		{
+			row.name = symbol != nullptr ? symbol : label;
+			row.named = symbol != nullptr;
+			row.start = block.vaddr;
+			row.end = block.vaddr + block.size;
+		}
+		row.start = std::min(row.start, block.vaddr);
+		row.end = std::max(row.end, block.vaddr + block.size);
+		row.calls += st.execPerFrame[i];
+		row.cycles += st.execPerFrame[i] * block.guestCycles;
+		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
+	}
+
+	std::vector<ProfileRow> out;
+	out.reserve(rows.size());
+	for (auto& entry : rows)
+		out.push_back(std::move(entry.second));
+	std::sort(out.begin(), out.end(), [](const ProfileRow& a, const ProfileRow& b) {
+		return a.cycles + a.missCycles > b.cycles + b.missCycles;
+	});
+	if (out.size() > limit)
+		out.resize(limit);
+	return out;
 }
 
 } // namespace cachesim

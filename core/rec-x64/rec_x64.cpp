@@ -142,7 +142,7 @@ public:
 			// single call instead of one model step per instruction.
 			// Only emitted while armed, so arming must reset the code cache.
 			const cachesim::BlockTrace *trace = cachesim::traceForBlock(block->vaddr,
-					block->addr, block->sh4_code_size);
+					block->addr, block->sh4_code_size, block->guest_cycles);
 			mov(call_regs64[0], (uintptr_t)trace);
 			GenCall(cachesim::traceBlock, true);
 		}

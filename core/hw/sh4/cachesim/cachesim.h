@@ -47,6 +47,7 @@ struct BlockTrace
 	u32 paddr;	// guest physical address of the first instruction
 	u32 size;	// guest bytes covered by the block
 	u32 id;		// dense index, used as the trace stream symbol
+	u32 guestCycles;	// flycast's issue-cycle estimate for one execution
 	u64 hash;	// hash of the guest instruction bytes: identity for JIT-resident
 			// code, whose address is not stable across runs
 };
@@ -112,7 +113,7 @@ void frameBoundary();
 //
 // Repeated compilations of the same block return the same descriptor, so the
 // pool is bounded by distinct guest code, not by recompilation churn.
-const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size);
+const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles);
 const std::deque<BlockTrace>& blocks();
 
 //
@@ -135,6 +136,35 @@ std::vector<EvictPair> setEvictors(Stream stream, u32 set);
 std::vector<SiteStat> topSites(Stream stream, size_t limit);
 std::vector<MissRecord> recentMisses();
 void setMissRingSize(size_t records);
+
+//
+// Profile: where the frame's guest cycles go
+//
+// Everything here is PER FRAME, smoothed over recent frames. Totals over a run
+// are dominated by loading and compilation and describe no frame that ever
+// happened.
+//
+struct ProfileRow
+{
+	std::string name;	// symbol, or an address range when there is none
+	u32 start;
+	u32 end;
+	double cycles;		// per frame, estimated: see the caveat below
+	double missCycles;	// of which, icache fill. Derived from miss counts
+	double calls;		// block entries per frame
+	bool named;
+};
+
+// Rows sorted by cost, biggest first. Cycles are FLYCAST'S estimate of issue
+// cost, not hardware truth - flycast retires fewer instructions per cycle than
+// the real chip - so the ranking is meaningful and the absolute figures are not.
+std::vector<ProfileRow> profile(size_t limit);
+// Guest cycles in a frame, and how many of them the rows above account for.
+// The difference is the CPU waiting: idle, asleep, or spinning somewhere that
+// never executed a block. Without it the percentages would silently be shares
+// of work done rather than shares of the frame.
+double profileFrameCycles();
+double profileAccountedCycles();
 
 //
 // Reporting (cachesim_report.cpp)

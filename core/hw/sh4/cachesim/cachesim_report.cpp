@@ -22,6 +22,7 @@
 // a second reader of the same numbers, never the only way to get at them.
 //
 #include "cachesim.h"
+#include "cachesim_symbols.h"
 
 #include "nowide/cstdio.hpp"
 
@@ -106,6 +107,17 @@ bool writeReport(const std::string& path)
 	fprintf(f, "  \"guest_seconds\": %.6f,\n", (double)cycles / SH4_MAIN_CLOCK);
 	fprintf(f, "  \"blocks_traced\": %zu,\n", blocks().size());
 
+	// Names are decoration, and only shown once the binary they came from has
+	// been checked against the code that actually ran
+	const SymbolVerification symbols = verifySymbols();
+	if (symbolsLoaded())
+		fprintf(f, "  \"symbols\": {\"source\": \"%s\", \"blocks_checked\": %zu,"
+				" \"blocks_matched\": %zu, \"trusted\": %s},\n",
+				symbolSource().c_str(), symbols.checked, symbols.matched,
+				symbols.trusted ? "true" : "false");
+	else
+		fprintf(f, "  \"symbols\": null,\n");
+
 	fprintf(f, "  \"icache\": {\n");
 	fprintf(f, "    \"sets\": %u, \"line_bytes\": %u, \"bytes\": %u,\n",
 			IC_SETS, LINE_BYTES, IC_SETS * LINE_BYTES);
@@ -140,13 +152,39 @@ bool writeReport(const std::string& path)
 	for (size_t i = 0; i < sites.size(); i++)
 	{
 		const SiteStat& s = sites[i];
+		const char *name = symbols.trusted ? symbolFor(s.line) : nullptr;
 		fprintf(f, "    {\"line\": \"0x%08x\", \"misses\": %" PRIu64 ", \"compulsory\": %" PRIu64
-				", \"capacity\": %" PRIu64 ", \"conflict\": %" PRIu64 "}%s\n",
+				", \"capacity\": %" PRIu64 ", \"conflict\": %" PRIu64 ", \"symbol\": ",
 				s.line, s.misses, s.kinds[(int)MissKind::Compulsory],
-				s.kinds[(int)MissKind::Capacity], s.kinds[(int)MissKind::Conflict],
-				i + 1 == sites.size() ? "" : ",");
+				s.kinds[(int)MissKind::Capacity], s.kinds[(int)MissKind::Conflict]);
+		if (name != nullptr)
+			fprintf(f, "\"%s\"}%s\n", name, i + 1 == sites.size() ? "" : ",");
+		else
+			// Generated code has no name to give, and an untrusted binary must
+			// not supply one
+			fprintf(f, "null}%s\n", i + 1 == sites.size() ? "" : ",");
 	}
 	fprintf(f, "  ],\n");
+
+	// Where the frame goes. Per frame and smoothed, never a run total: a total
+	// is mostly loading and compilation and describes no frame that happened.
+	fprintf(f, "  \"profile_per_frame\": {\n");
+	fprintf(f, "    \"guest_cycles\": %.0f,\n", profileFrameCycles());
+	fprintf(f, "    \"accounted_cycles\": %.0f,\n", profileAccountedCycles());
+	fprintf(f, "    \"note\": \"estimated issue cycles from flycast's model, not hardware;"
+			" ranking is meaningful, absolute values are not. Unaccounted cycles are the CPU"
+			" idle, asleep or spinning outside any block.\",\n");
+	fprintf(f, "    \"rows\": [\n");
+	const std::vector<ProfileRow> rows = profile(64);
+	for (size_t i = 0; i < rows.size(); i++)
+	{
+		const ProfileRow& r = rows[i];
+		fprintf(f, "      {\"name\": \"%s\", \"named\": %s, \"start\": \"0x%08x\","
+				" \"cycles\": %.0f, \"icache_cycles\": %.0f, \"calls\": %.1f}%s\n",
+				r.name.c_str(), r.named ? "true" : "false", r.start,
+				r.cycles, r.missCycles, r.calls, i + 1 == rows.size() ? "" : ",");
+	}
+	fprintf(f, "    ]\n  },\n");
 
 	// Per-set pressure, and for each set the lines that threw each other out.
 	// This is the part a layout change acts on.

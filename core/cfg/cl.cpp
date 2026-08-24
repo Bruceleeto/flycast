@@ -42,6 +42,9 @@ static void usage(const char *exe)
 	fprintf(stderr, "                               emulated timing.\n");
 	fprintf(stderr, "-cachesim-report file          write the cache report there when the run ends.\n");
 	fprintf(stderr, "                               Implies -cachesim.\n");
+	fprintf(stderr, "-cachesim-symbols file        name rows using this ELF's symbols. By default the\n");
+	fprintf(stderr, "                               ELF beside the content is used if there is one.\n");
+	fprintf(stderr, "                               Ignored unless it matches the code that ran.\n");
 	fprintf(stderr, "-cachesim-trace file           record the block execution stream, for replaying\n");
 	fprintf(stderr, "                               layout changes offline with cachesweep. Large:\n");
 	fprintf(stderr, "                               tens of MB per guest second. Implies -cachesim.\n");
@@ -258,6 +261,10 @@ void parseCommandLine(int argc, const char * const argv[])
 		}
 		if (optionValue(argc, argv, i, "-cachesim-lookahead", value)) {
 			setTransient("config", "Debug.CacheSimLookahead", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-cachesim-symbols", value)) {
+			setTransient("config", "Debug.CacheSimSymbols", value);
 			continue;
 		}
 		if (optionValue(argc, argv, i, "-cachesim-trace", value)) {

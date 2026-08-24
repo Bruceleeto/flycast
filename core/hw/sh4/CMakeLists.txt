@@ -2,6 +2,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         cachesim/cachesim.cpp
         cachesim/cachesim_report.cpp
         cachesim/cachesim_model.h
+        cachesim/cachesim_symbols.cpp
+        cachesim/cachesim_symbols.h
         cachesim/cachesim_trace.cpp
         cachesim/cachesim_trace.h
         cachesim/cachesim.h

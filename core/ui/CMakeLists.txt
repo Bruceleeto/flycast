@@ -11,6 +11,8 @@ if(NOT LIBRETRO)
             vgamepad.cpp
             vgamepad.h
             gui_chat.h
+            gui_cachesim.cpp
+            gui_cachesim.h
             gui_cheats.cpp
             gui_util.cpp
             gui_util.h
