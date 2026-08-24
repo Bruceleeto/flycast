@@ -35,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -81,7 +82,7 @@ struct Options
 	// Sweep of shift deltas: from, to, step
 	bool sweep = false;
 	int64_t from = 0, to = 0, step = 0;
-	size_t topN = 10;
+	size_t topN = 5;
 
 	// Moves already decided on, applied before `shift`. The reorder search
 	// accumulates into this: each unit it places stays placed while the next
@@ -95,11 +96,26 @@ struct Options
 	// Discovery: find the regions worth moving instead of being told them
 	bool automatic = false;
 	bool reorder = false;
+	// Storms
+	bool storms = false;
+	u64 bucketCycles = 32768;	// ~0.16 ms, about 100 buckets per frame
+	double stormFactor = 4.0;
 	size_t reorderUnits = 4;	// functions to place
 	int64_t reorderStep = 512;	// alignment granularity searched per function
 	size_t regions = 4;		// candidate regions to try
 	u32 clusterGap = 64 << 10;	// lines further apart than this start a new region
 	int64_t autoStep = 1024;	// shift granularity when sweeping a candidate
+};
+
+// Watches a replay as it happens. The trace carries a timestamp every 4096
+// cycles, which is what makes it possible to ask when the misses happened
+// rather than only how many there were.
+struct ReplayWatcher
+{
+	virtual ~ReplayWatcher() = default;
+	// Called after each block, with what that block cost
+	virtual void block(u64 cycle, u32 blockId, u64 misses, u64 conflict) = 0;
+	virtual void frame(u64 cycle) = 0;
 };
 
 class Trace
@@ -147,7 +163,7 @@ public:
 
 	// Replays the whole trace into `model`, moving any block the shift covers.
 	// Returns the number of frames seen.
-	u64 replay(Model& model, const Options& opt)
+	u64 replay(Model& model, const Options& opt, ReplayWatcher *watcher = nullptr)
 	{
 		pos = headerEnd;
 		blocks.clear();
@@ -163,7 +179,19 @@ public:
 			{
 				const u32 id = (u32)(v - 1);
 				if (id < blocks.size())
+				{
+					if (watcher == nullptr)
+					{
+						execute(model, blocks[id], opt);
+						continue;
+					}
+					const Counters& c = model.counters();
+					const u64 m0 = c.misses[(int)Stream::Inst];
+					const u64 k0 = c.missKinds[(int)Stream::Inst][(int)MissKind::Conflict];
 					execute(model, blocks[id], opt);
+					watcher->block(cycle, id, c.misses[(int)Stream::Inst] - m0,
+							c.missKinds[(int)Stream::Inst][(int)MissKind::Conflict] - k0);
+				}
 				continue;
 			}
 			const u8 event = bytes[pos++];
@@ -191,7 +219,11 @@ public:
 				model.writeInstAddressArray(addr, data, INVALID_LINE);
 			}
 			else if (event == TraceEvent::FrameBoundary)
+			{
 				frames++;
+				if (watcher != nullptr)
+					watcher->frame(cycle);
+			}
 			else if (event == TraceEvent::Cycle)
 			{
 				cycle += readVarint();
@@ -732,6 +764,273 @@ int runReorder(Trace& trace, Options opt)
 	return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Storms
+//
+// A miss total says how much the cache cost over a window. It does not say
+// whether that cost was spread evenly or arrived in a few bursts that blew a
+// frame's budget, and those are different problems: an even rate is a design
+// cost, a burst is a hitch somebody can feel.
+//
+// Two passes. The first buckets misses by time to find the bursts; the second
+// replays again and attributes only what falls inside them, because which
+// blocks were responsible cannot be known until the storms have been found.
+// ---------------------------------------------------------------------------
+
+constexpr u64 SH4_CLOCK = 200000000;
+
+struct Storm
+{
+	u64 startCycle;
+	u64 endCycle;
+	u64 misses;
+	u64 conflict;
+	u64 frame;
+	std::vector<std::pair<u32, u64>> blame;	// block id, misses
+};
+
+class StormFinder : public ReplayWatcher
+{
+public:
+	StormFinder(u64 bucketCycles) : bucketCycles(bucketCycles) {}
+
+	void block(u64 cycle, u32, u64 misses, u64 conflict) override
+	{
+		const size_t b = (size_t)(cycle / bucketCycles);
+		if (b >= buckets.size())
+		{
+			buckets.resize(b + 1, 0);
+			conflicts.resize(b + 1, 0);
+			frameAt.resize(b + 1, frames);
+		}
+		buckets[b] += misses;
+		conflicts[b] += conflict;
+	}
+
+	void frame(u64) override { frames++; }
+
+	u64 bucketCycles;
+	u64 frames = 0;
+	std::vector<u64> buckets;
+	std::vector<u64> conflicts;
+	std::vector<u64> frameAt;	// which frame each bucket fell in
+};
+
+class StormBlamer : public ReplayWatcher
+{
+public:
+	StormBlamer(const std::vector<Storm>& storms, const std::vector<bool>& detailed)
+		: storms(storms), detailed(detailed) {}
+
+	void block(u64 cycle, u32 blockId, u64 misses, u64) override
+	{
+		if (misses == 0 || next >= storms.size())
+			return;
+		// Storms are in cycle order and so is the replay, so this walks forward
+		// rather than searching
+		while (next < storms.size() && cycle >= storms[next].endCycle)
+			next++;
+		if (next >= storms.size() || cycle < storms[next].startCycle)
+			return;
+		// Every storm feeds the aggregate. The aggregate is the answer to
+		// "what causes bursts"; one storm on its own is an anecdote, and on a
+		// workload with a game loop it is an anecdote that repeats.
+		total[blockId] += misses;
+		if (detailed[next])
+			blame[next][blockId] += misses;
+	}
+
+	void frame(u64) override {}
+
+	const std::vector<Storm>& storms;
+	const std::vector<bool>& detailed;
+	size_t next = 0;
+	std::map<u32, u64> total;
+	std::map<size_t, std::map<u32, u64>> blame;
+};
+
+// Prints the worst blocks in a blame map, named where a symbol exists.
+void printBlame(const Trace& trace, const std::map<u32, u64>& blame, u64 outOf,
+		size_t rows, const char *indent)
+{
+	// Grouped by function, not by block: a function is many blocks, and listing
+	// each one separately puts the same name in the list six times while hiding
+	// how much it actually cost. Generated code has no name, so it is grouped by
+	// 64 KB range - the same granularity the live profile uses, so the two views
+	// name the same things the same way.
+	std::map<std::string, u64> grouped;
+	for (const auto& r : blame)
+	{
+		const Block& b = trace.blockTable()[r.first];
+		const Sym *sym = symbolFor(b.paddr);
+		char name[48];
+		if (sym != nullptr)
+			std::snprintf(name, sizeof(name), "%s", sym->name.c_str());
+		else
+		{
+			const u32 base = Shift::normalise(b.paddr) & ~0xffffu;
+			std::snprintf(name, sizeof(name), "%08x-%08x", base, base + 0x10000);
+		}
+		grouped[name] += r.second;
+	}
+
+	std::vector<std::pair<std::string, u64>> sorted(grouped.begin(), grouped.end());
+	std::sort(sorted.begin(), sorted.end(),
+			[](const std::pair<std::string, u64>& a, const std::pair<std::string, u64>& b) {
+				return a.second > b.second;
+			});
+	if (sorted.size() > rows)
+		sorted.resize(rows);
+	for (const auto& r : sorted)
+		std::printf("%s%-34s %8" PRIu64 " misses  %4.1f%%\n",
+				indent, r.first.c_str(), r.second,
+				outOf == 0 ? 0.0 : 100.0 * r.second / outOf);
+}
+
+int runStorms(Trace& trace, const Options& opt)
+{
+	if (opt.bucketCycles < 4096)
+	{
+		// The trace only carries a timestamp every 4096 cycles, so a finer
+		// bucket would be inventing resolution the recording does not have
+		std::fprintf(stderr, "--storm-bucket must be at least 4096 cycles:"
+				" that is the timestamp resolution of the trace\n");
+		return 1;
+	}
+
+	Model model;
+	model.setMissRingSize(0);
+	StormFinder finder(opt.bucketCycles);
+	trace.replay(model, opt, &finder);
+
+	// Buckets with no misses at all are still time that passed, and dropping
+	// them would raise the median until nothing looked like a storm
+	std::vector<u64> sorted = finder.buckets;
+	if (sorted.empty())
+	{
+		std::printf("no blocks in the trace\n");
+		return 0;
+	}
+	std::sort(sorted.begin(), sorted.end());
+	const u64 median = sorted[sorted.size() / 2];
+	const u64 p99 = sorted[(size_t)(sorted.size() * 0.99)];
+	const u64 peak = sorted.back();
+	u64 totalMisses = 0;
+	for (u64 m : finder.buckets)
+		totalMisses += m;
+
+	// A median of zero would make any bucket with one miss a storm, so the
+	// floor comes from the mean instead
+	const double mean = (double)totalMisses / finder.buckets.size();
+	const double threshold = std::max(opt.stormFactor * (double)median,
+			opt.stormFactor * mean);
+
+	std::printf("%zu buckets of %" PRIu64 " cycles (%.3f ms), %" PRIu64 " frames\n",
+			finder.buckets.size(), opt.bucketCycles,
+			1000.0 * opt.bucketCycles / SH4_CLOCK, finder.frames);
+	size_t quiet = 0;
+	for (u64 m : finder.buckets)
+		if (m == 0)
+			quiet++;
+	std::printf("misses per bucket: median %" PRIu64 "  mean %.1f  p99 %" PRIu64
+			"  peak %" PRIu64 "\n", median, mean, p99, peak);
+	// A median of zero is not a broken statistic, it is the shape of the data,
+	// and saying so stops the threshold line below from looking arbitrary
+	std::printf("%.1f%% of buckets have no misses at all\n",
+			100.0 * quiet / finder.buckets.size());
+	std::printf("storm threshold: %.0f misses per bucket (%.1fx the larger of"
+			" median and mean)\n\n", threshold, opt.stormFactor);
+
+	// Adjacent hot buckets are one storm, not several
+	std::vector<Storm> storms;
+	for (size_t b = 0; b < finder.buckets.size(); b++)
+	{
+		if ((double)finder.buckets[b] < threshold)
+			continue;
+		if (!storms.empty() && storms.back().endCycle == b * opt.bucketCycles)
+		{
+			storms.back().endCycle = (b + 1) * opt.bucketCycles;
+			storms.back().misses += finder.buckets[b];
+			storms.back().conflict += finder.conflicts[b];
+			continue;
+		}
+		storms.push_back({ b * opt.bucketCycles, (b + 1) * opt.bucketCycles,
+				finder.buckets[b], finder.conflicts[b], finder.frameAt[b], {} });
+	}
+
+	u64 stormMisses = 0;
+	u64 stormBuckets = 0;
+	for (const Storm& s : storms)
+	{
+		stormMisses += s.misses;
+		stormBuckets += (s.endCycle - s.startCycle) / opt.bucketCycles;
+	}
+	std::printf("%zu storms: %.2f%% of the time holding %.1f%% of all misses\n",
+			storms.size(),
+			100.0 * stormBuckets / finder.buckets.size(),
+			totalMisses == 0 ? 0.0 : 100.0 * stormMisses / totalMisses);
+	if (storms.empty())
+	{
+		// Worth saying plainly: an even rate is a finding, not a failure to find
+		std::printf("\nMisses are spread evenly at this bucket size. Nothing here"
+				" is a burst; the cost is the steady rate.\n");
+		return 0;
+	}
+
+	// How often, and how long. A storm every frame at the same size is a
+	// periodic cost; a handful of outliers is a hitch. They read the same in a
+	// total and want different fixes, so both are said.
+	u64 longest = 0;
+	double meanMs = 0;
+	for (const Storm& s : storms)
+	{
+		longest = std::max(longest, s.endCycle - s.startCycle);
+		meanMs += 1000.0 * (s.endCycle - s.startCycle) / SH4_CLOCK;
+	}
+	meanMs /= storms.size();
+	std::printf("  %.2f per frame, mean %.3f ms, longest %.3f ms\n",
+			finder.frames == 0 ? 0.0 : (double)storms.size() / finder.frames,
+			meanMs, 1000.0 * longest / SH4_CLOCK);
+
+	// Mark the worst few for a detailed listing; every storm still feeds the
+	// aggregate below
+	std::vector<size_t> order(storms.size());
+	for (size_t i = 0; i < order.size(); i++)
+		order[i] = i;
+	std::sort(order.begin(), order.end(), [&storms](size_t a, size_t b) {
+		return storms[a].misses > storms[b].misses;
+	});
+	std::vector<bool> detailed(storms.size(), false);
+	for (size_t i = 0; i < order.size() && i < opt.topN; i++)
+		detailed[order[i]] = true;
+
+	Model second;
+	second.setMissRingSize(0);
+	StormBlamer blamer(storms, detailed);
+	trace.replay(second, opt, &blamer);
+
+	std::printf("\nwhat is in the storms, across all %zu of them:\n", storms.size());
+	printBlame(trace, blamer.total, stormMisses, 12, "  ");
+
+	std::printf("\nthe %zu worst individually:\n",
+			std::min(opt.topN, storms.size()));
+	for (size_t i = 0; i < storms.size(); i++)
+	{
+		if (!detailed[i])
+			continue;
+		const Storm& s = storms[i];
+		std::printf("  frame %-6" PRIu64 " cycle %" PRIu64 "  %.3f ms  %" PRIu64
+				" misses (%.0f%% conflict)\n",
+				s.frame, s.startCycle,
+				1000.0 * (s.endCycle - s.startCycle) / SH4_CLOCK, s.misses,
+				s.misses == 0 ? 0.0 : 100.0 * s.conflict / s.misses);
+		auto it = blamer.blame.find(i);
+		if (it != blamer.blame.end())
+			printBlame(trace, it->second, s.misses, 4, "      ");
+	}
+	return 0;
+}
+
 void usage(const char *exe)
 {
 	std::fprintf(stderr,
@@ -745,6 +1044,11 @@ void usage(const char *exe)
 		"  --reorder-units n         functions to place (default 4)\n"
 		"  --reorder-step n          alignment granularity searched (default 512)\n"
 		"  --symbols file.elf        name regions and functions from an ELF\n"
+		"  --storms                  find bursts of misses in time and say what\n"
+		"                            caused them\n"
+		"  --storm-bucket n          bucket width in guest cycles (default 32768)\n"
+		"  --storm-factor f          a bucket is a storm at f times the typical\n"
+		"                            rate (default 4)\n"
 		"  --regions n               candidates to try in --auto (default 4)\n"
 		"  --auto-step n             shift granularity in --auto (default 1024)\n"
 		"  --shift start:end:delta   move guest code in [start,end) by delta bytes\n"
@@ -798,6 +1102,12 @@ int main(int argc, char *argv[])
 			opt.automatic = true;
 		else if (arg == "--reorder")
 			opt.reorder = true;
+		else if (arg == "--storms")
+			opt.storms = true;
+		else if (arg == "--storm-bucket" && i + 1 < argc)
+			opt.bucketCycles = strtoull(argv[++i], nullptr, 0);
+		else if (arg == "--storm-factor" && i + 1 < argc)
+			opt.stormFactor = strtod(argv[++i], nullptr);
 		else if (arg == "--reorder-units" && i + 1 < argc)
 			opt.reorderUnits = strtoul(argv[++i], nullptr, 0);
 		else if (arg == "--reorder-step" && i + 1 < argc)
@@ -832,6 +1142,9 @@ int main(int argc, char *argv[])
 	Trace trace;
 	if (!trace.load(opt.tracePath))
 		return 1;
+
+	if (opt.storms)
+		return runStorms(trace, opt);
 
 	if (opt.reorder)
 		return runReorder(trace, opt);
