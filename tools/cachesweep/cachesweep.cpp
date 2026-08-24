@@ -76,6 +76,7 @@ struct Shift
 struct Options
 {
 	std::string tracePath;
+	std::string jsonPath;
 	u32 lookahead = 0;
 	bool iix = false;
 	Shift shift;
@@ -117,6 +118,56 @@ struct ReplayWatcher
 	virtual void block(u64 cycle, u32 blockId, u64 misses, u64 conflict) = 0;
 	virtual void frame(u64 cycle) = 0;
 };
+
+// Machine-readable output, in the same spirit as flycast's own report: the
+// terminal text is for reading, this is for diffing one experiment against the
+// next. Written alongside the text rather than instead of it.
+struct JsonOut
+{
+	FILE *f = nullptr;
+
+	bool open(const std::string& path)
+	{
+		if (path.empty())
+			return true;
+		f = std::fopen(path.c_str(), "w");
+		if (f == nullptr)
+			std::fprintf(stderr, "cannot write %s\n", path.c_str());
+		return f != nullptr;
+	}
+	void close()
+	{
+		if (f != nullptr)
+			std::fclose(f);
+		f = nullptr;
+	}
+	explicit operator bool() const { return f != nullptr; }
+
+	void raw(const char *text) { if (f != nullptr) std::fputs(text, f); }
+
+	template<typename... A>
+	void w(const char *fmt, A... a) { if (f != nullptr) std::fprintf(f, fmt, a...); }
+
+	// Symbol names come from an ELF somebody else built, so they are escaped
+	// rather than trusted to be JSON-safe
+	void str(const char *v)
+	{
+		if (f == nullptr)
+			return;
+		std::fputc('"', f);
+		for (const char *p = v; *p != 0; p++)
+		{
+			if (*p == '"' || *p == '\\')
+				std::fputc('\\', f);
+			if ((unsigned char)*p < 0x20)
+				continue;
+			std::fputc(*p, f);
+		}
+		std::fputc('"', f);
+	}
+};
+
+JsonOut json;
 
 class Trace
 {
@@ -486,6 +537,21 @@ void reportDetail(Trace& trace, const Options& opt)
 			c.missKinds[inst][(int)MissKind::Compulsory],
 			c.missKinds[inst][(int)MissKind::Invalidated]);
 
+	if (json)
+	{
+		json.w("{\n  \"schema\": \"cachesweep/1\",\n  \"mode\": \"detail\",\n");
+		json.w("  \"blocks\": %zu,\n  \"frames\": %" PRIu64 ",\n  \"guest_cycles\": %"
+				PRIu64 ",\n", trace.blockTable().size(), frames, trace.cycles());
+		json.w("  \"fetches\": %" PRIu64 ",\n  \"misses\": %" PRIu64 ",\n",
+				c.instFetched, c.misses[inst]);
+		json.w("  \"conflict\": %" PRIu64 ", \"capacity\": %" PRIu64
+				", \"compulsory\": %" PRIu64 ", \"invalidated\": %" PRIu64 ",\n",
+				c.missKinds[inst][(int)MissKind::Conflict],
+				c.missKinds[inst][(int)MissKind::Capacity],
+				c.missKinds[inst][(int)MissKind::Compulsory],
+				c.missKinds[inst][(int)MissKind::Invalidated]);
+		json.raw("  \"worst_sets\": [");
+	}
 	std::printf("worst sets\n");
 	const Cache& cache = model.cacheFor(Stream::Inst);
 	std::vector<u32> order;
@@ -497,9 +563,32 @@ void reportDetail(Trace& trace, const Options& opt)
 	});
 	if (order.size() > opt.topN)
 		order.resize(opt.topN);
+	bool firstSet = true;
 	for (u32 set : order)
 	{
 		std::printf("  set %3u  %10" PRIu64 " misses\n", set, cache.stats[set].misses);
+		if (json)
+		{
+			json.raw(firstSet ? "\n    " : ",\n    ");
+			firstSet = false;
+			json.w("{\"set\": %u, \"misses\": %" PRIu64 ", \"evictors\": [",
+					set, cache.stats[set].misses);
+			bool firstEvictor = true;
+			for (const EvictPair& e : model.setEvictors(Stream::Inst, set))
+			{
+				json.w("%s{\"line\": \"0x%08x\", \"evicted\": \"0x%08x\","
+						" \"count\": %" PRIu64 ", \"symbol\": ",
+						firstEvictor ? "" : ", ", e.line, e.evictedLine, e.count);
+				firstEvictor = false;
+				const Sym *sym = symbolFor(e.line);
+				if (sym != nullptr)
+					json.str(sym->name.c_str());
+				else
+					json.raw("null");
+				json.raw("}");
+			}
+			json.raw("]}");
+		}
 		for (const EvictPair& e : model.setEvictors(Stream::Inst, set))
 		{
 			// The pair is the useful part: what keeps throwing what out. Names
@@ -514,6 +603,7 @@ void reportDetail(Trace& trace, const Options& opt)
 					evicted != nullptr ? evicted->name.c_str() : "");
 		}
 	}
+	json.raw(firstSet ? "]\n}\n" : "\n  ]\n}\n");
 }
 
 // A contiguous run of guest code that conflict misses cluster into. Derived
@@ -666,6 +756,13 @@ int runReorder(Trace& trace, Options opt)
 		std::printf("no conflict misses to work with\n");
 		return 0;
 	}
+	if (json)
+	{
+		json.w("{\n  \"schema\": \"cachesweep/1\",\n  \"mode\": \"reorder\",\n");
+		json.w("  \"baseline\": {\"misses\": %" PRIu64 ", \"conflict\": %" PRIu64 "},\n",
+				baseMisses, baseConflict);
+		json.w("  \"step\": %" PRId64 ",\n  \"units\": [", opt.reorderStep);
+	}
 	std::printf("units to place, by conflict misses:\n");
 	for (const Unit& u : units)
 		std::printf("  %-32s %08x-%08x %10" PRIu64 " (%.1f%% of conflict)\n",
@@ -691,6 +788,16 @@ int runReorder(Trace& trace, Options opt)
 		std::printf("%s  (at %08x, alignment %04x; %% is against the running total"
 				" %" PRIu64 ", not the baseline)\n",
 				unitLabel(u).c_str(), u.start, (u32)(u.start & (span - 1)), bestTotal);
+		if (json)
+		{
+			json.raw(i == 0 ? "\n    {\"name\": " : ",\n    {\"name\": ");
+			json.str(unitLabel(u).c_str());
+			json.w(", \"named\": %s, \"start\": \"0x%08x\", \"end\": \"0x%08x\","
+					" \"conflict\": %" PRIu64 ", \"alignment\": \"0x%04x\",\n"
+					"     \"candidates\": [",
+					u.name.empty() ? "false" : "true", u.start, u.end, u.conflict,
+					(u32)(u.start & (span - 1)));
+		}
 
 		int64_t bestDelta = 0;
 		u64 bestMisses = bestTotal;
@@ -704,6 +811,9 @@ int runReorder(Trace& trace, Options opt)
 			std::printf("    alignment %04x  %12" PRIu64 " misses  %12" PRIu64 " conflict  %+7.2f%%\n",
 					(u32)off, res.misses, res.conflict,
 					bestTotal == 0 ? 0.0 : 100.0 * ((double)res.misses - bestTotal) / bestTotal);
+			json.w("%s{\"alignment\": \"0x%04x\", \"misses\": %" PRIu64
+					", \"conflict\": %" PRIu64 "}",
+					off == 0 ? "" : ", ", (u32)off, res.misses, res.conflict);
 			if (res.misses < bestMisses)
 			{
 				bestMisses = res.misses;
@@ -713,6 +823,7 @@ int runReorder(Trace& trace, Options opt)
 		if (bestDelta == 0)
 		{
 			std::printf("    no alignment beat leaving it where it is\n\n");
+			json.raw("],\n     \"placed\": false}");
 			continue;
 		}
 		// Placed. Everything after this is searched with this unit moved, so
@@ -722,16 +833,34 @@ int runReorder(Trace& trace, Options opt)
 		std::printf("    placed at alignment %04x  ->  %" PRIu64 " misses (%.2f%% below baseline)\n\n",
 				(u32)((u.start + bestDelta) & (span - 1)), bestMisses,
 				100.0 * ((double)baseMisses - bestMisses) / baseMisses);
+		json.w("],\n     \"placed\": true, \"placed_alignment\": \"0x%04x\","
+				" \"running_total\": %" PRIu64 ", \"vs_baseline\": %.5f}",
+				(u32)((u.start + bestDelta) & (span - 1)), bestMisses,
+				((double)baseMisses - bestMisses) / baseMisses);
 		bestTotal = bestMisses;
 	}
 
 	if (opt.fixed.empty())
 	{
 		std::printf("no placement beat the measured layout\n");
+		json.raw("\n  ],\n  \"layout\": []\n}\n");
 		return 0;
 	}
+	// Verified before anything is reported, so the text and the JSON can be
+	// written in one pass and in the same order. The replay is the search's own
+	// self-check: a greedy accumulator that drifted would otherwise report a
+	// layout nobody can reproduce.
+	Options verify = opt;
+	verify.shift = Shift{};
+	const Result check = run(trace, verify);
+
 	std::printf("layout: %" PRIu64 " misses, %.2f%% fewer than baseline\n",
 			bestTotal, 100.0 * ((double)baseMisses - bestTotal) / baseMisses);
+	json.w("\n  ],\n  \"verified\": %s,\n  \"total\": %" PRIu64 ","
+			" \"vs_baseline\": %.5f,\n  \"layout\": [",
+			check.misses == bestTotal ? "true" : "false", bestTotal,
+			((double)baseMisses - bestTotal) / baseMisses);
+
 	for (const Shift& m : opt.fixed)
 	{
 		const Unit *u = nullptr;
@@ -742,13 +871,18 @@ int runReorder(Trace& trace, Options opt)
 				u != nullptr ? unitLabel(*u).c_str() : "?",
 				(u32)((m.start + m.delta) & (span - 1)), (u32)span,
 				(u32)(m.start & (span - 1)));
+		if (json)
+		{
+			json.raw(&m == &opt.fixed[0] ? "\n    {\"name\": " : ",\n    {\"name\": ");
+			json.str(u != nullptr ? unitLabel(*u).c_str() : "?");
+			json.w(", \"start\": \"0x%08x\", \"align_to\": \"0x%04x\","
+					" \"was\": \"0x%04x\", \"modulo\": \"0x%04x\"}",
+					m.start, (u32)((m.start + m.delta) & (span - 1)),
+					(u32)(m.start & (span - 1)), (u32)span);
+		}
 	}
-	// The running total came out of a search that added one move at a time.
-	// Replaying the final layout from scratch is one more pass and catches an
-	// accumulation bug that would otherwise be reported as a result.
-	Options verify = opt;
-	verify.shift = Shift{};
-	const Result check = run(trace, verify);
+	json.raw("\n  ]\n}\n");
+
 	if (check.misses != bestTotal)
 	{
 		std::printf("\nthe combined layout replays to %" PRIu64 " misses, not the %" PRIu64
@@ -849,9 +983,10 @@ public:
 	std::map<size_t, std::map<u32, u64>> blame;
 };
 
-// Prints the worst blocks in a blame map, named where a symbol exists.
-void printBlame(const Trace& trace, const std::map<u32, u64>& blame, u64 outOf,
-		size_t rows, const char *indent)
+// Groups a blame map by function and returns it worst first, so the text and
+// the JSON say the same thing rather than each grouping it their own way.
+std::vector<std::pair<std::string, u64>> groupBlame(const Trace& trace,
+		const std::map<u32, u64>& blame, size_t rows)
 {
 	// Grouped by function, not by block: a function is many blocks, and listing
 	// each one separately puts the same name in the list six times while hiding
@@ -881,10 +1016,34 @@ void printBlame(const Trace& trace, const std::map<u32, u64>& blame, u64 outOf,
 			});
 	if (sorted.size() > rows)
 		sorted.resize(rows);
-	for (const auto& r : sorted)
+	return sorted;
+}
+
+void printBlame(const Trace& trace, const std::map<u32, u64>& blame, u64 outOf,
+		size_t rows, const char *indent)
+{
+	for (const auto& r : groupBlame(trace, blame, rows))
 		std::printf("%s%-34s %8" PRIu64 " misses  %4.1f%%\n",
 				indent, r.first.c_str(), r.second,
 				outOf == 0 ? 0.0 : 100.0 * r.second / outOf);
+}
+
+void jsonBlame(const Trace& trace, const std::map<u32, u64>& blame, u64 outOf, size_t rows)
+{
+	if (!json)
+		return;
+	const std::vector<std::pair<std::string, u64>> grouped = groupBlame(trace, blame, rows);
+	json.raw("[");
+	for (size_t i = 0; i < grouped.size(); i++)
+	{
+		json.raw(i == 0 ? "\n" : ",\n");
+		json.raw("        {\"name\": ");
+		json.str(grouped[i].first.c_str());
+		json.w(", \"misses\": %" PRIu64 ", \"share\": %.5f}",
+				grouped[i].second,
+				outOf == 0 ? 0.0 : (double)grouped[i].second / outOf);
+	}
+	json.raw(grouped.empty() ? "]" : "\n      ]");
 }
 
 int runStorms(Trace& trace, const Options& opt)
@@ -974,6 +1133,9 @@ int runStorms(Trace& trace, const Options& opt)
 		// Worth saying plainly: an even rate is a finding, not a failure to find
 		std::printf("\nMisses are spread evenly at this bucket size. Nothing here"
 				" is a burst; the cost is the steady rate.\n");
+		json.w("{\n  \"schema\": \"cachesweep/1\",\n  \"mode\": \"storms\",\n"
+				"  \"bucket_cycles\": %" PRIu64 ",\n  \"misses\": %" PRIu64 ",\n"
+				"  \"storms\": {\"count\": 0}\n}\n", opt.bucketCycles, totalMisses);
 		return 0;
 	}
 
@@ -1012,8 +1174,32 @@ int runStorms(Trace& trace, const Options& opt)
 	std::printf("\nwhat is in the storms, across all %zu of them:\n", storms.size());
 	printBlame(trace, blamer.total, stormMisses, 12, "  ");
 
+	if (json)
+	{
+		json.w("{\n  \"schema\": \"cachesweep/1\",\n  \"mode\": \"storms\",\n");
+		json.w("  \"bucket_cycles\": %" PRIu64 ",\n", opt.bucketCycles);
+		json.w("  \"buckets\": %zu,\n", finder.buckets.size());
+		json.w("  \"frames\": %" PRIu64 ",\n", finder.frames);
+		json.w("  \"misses\": %" PRIu64 ",\n", totalMisses);
+		json.w("  \"per_bucket\": {\"median\": %" PRIu64 ", \"mean\": %.3f,"
+				" \"p99\": %" PRIu64 ", \"peak\": %" PRIu64 ", \"empty_share\": %.5f},\n",
+				median, mean, p99, peak, (double)quiet / finder.buckets.size());
+		json.w("  \"threshold\": %.1f,\n", threshold);
+		json.w("  \"storms\": {\"count\": %zu, \"time_share\": %.5f,"
+				" \"miss_share\": %.5f, \"per_frame\": %.3f,"
+				" \"mean_ms\": %.4f, \"longest_ms\": %.4f},\n",
+				storms.size(), (double)stormBuckets / finder.buckets.size(),
+				totalMisses == 0 ? 0.0 : (double)stormMisses / totalMisses,
+				finder.frames == 0 ? 0.0 : (double)storms.size() / finder.frames,
+				meanMs, 1000.0 * longest / SH4_CLOCK);
+		json.raw("  \"blame\": ");
+		jsonBlame(trace, blamer.total, stormMisses, 24);
+		json.raw(",\n  \"worst\": [");
+	}
+
 	std::printf("\nthe %zu worst individually:\n",
 			std::min(opt.topN, storms.size()));
+	bool printedAny = false;
 	for (size_t i = 0; i < storms.size(); i++)
 	{
 		if (!detailed[i])
@@ -1027,7 +1213,24 @@ int runStorms(Trace& trace, const Options& opt)
 		auto it = blamer.blame.find(i);
 		if (it != blamer.blame.end())
 			printBlame(trace, it->second, s.misses, 4, "      ");
+
+		if (json)
+		{
+			json.raw(printedAny ? ",\n" : "\n");
+			printedAny = true;
+			json.w("    {\"frame\": %" PRIu64 ", \"start_cycle\": %" PRIu64
+					", \"end_cycle\": %" PRIu64 ", \"ms\": %.4f,"
+					" \"misses\": %" PRIu64 ", \"conflict\": %" PRIu64 ",\n      \"blame\": ",
+					s.frame, s.startCycle, s.endCycle,
+					1000.0 * (s.endCycle - s.startCycle) / SH4_CLOCK, s.misses, s.conflict);
+			if (it != blamer.blame.end())
+				jsonBlame(trace, it->second, s.misses, 8);
+			else
+				json.raw("[]");
+			json.raw("}");
+		}
 	}
+	json.raw(printedAny ? "\n  ]\n}\n" : "]\n}\n");
 	return 0;
 }
 
@@ -1044,6 +1247,8 @@ void usage(const char *exe)
 		"  --reorder-units n         functions to place (default 4)\n"
 		"  --reorder-step n          alignment granularity searched (default 512)\n"
 		"  --symbols file.elf        name regions and functions from an ELF\n"
+		"  --json file.json          also write the result as JSON, for diffing one\n"
+		"                            experiment against the next\n"
 		"  --storms                  find bursts of misses in time and say what\n"
 		"                            caused them\n"
 		"  --storm-bucket n          bucket width in guest cycles (default 32768)\n"
@@ -1114,6 +1319,8 @@ int main(int argc, char *argv[])
 			opt.reorderStep = strtoll(argv[++i], nullptr, 0);
 		else if (arg == "--symbols" && i + 1 < argc)
 			opt.symbolPath = argv[++i];
+		else if (arg == "--json" && i + 1 < argc)
+			opt.jsonPath = argv[++i];
 		else if (arg == "--regions" && i + 1 < argc)
 			opt.regions = strtoul(argv[++i], nullptr, 0);
 		else if (arg == "--auto-step" && i + 1 < argc)
@@ -1143,11 +1350,22 @@ int main(int argc, char *argv[])
 	if (!trace.load(opt.tracePath))
 		return 1;
 
+	if (!json.open(opt.jsonPath))
+		return 1;
+
 	if (opt.storms)
-		return runStorms(trace, opt);
+	{
+		const int rv = runStorms(trace, opt);
+		json.close();
+		return rv;
+	}
 
 	if (opt.reorder)
-		return runReorder(trace, opt);
+	{
+		const int rv = runReorder(trace, opt);
+		json.close();
+		return rv;
+	}
 
 	if (opt.automatic)
 	{
@@ -1166,10 +1384,31 @@ int main(int argc, char *argv[])
 		std::vector<Region> regions = discoverRegions(probe, opt);
 		if (regions.size() > opt.regions)
 			regions.resize(opt.regions);
+		if (json)
+		{
+			json.w("{\n  \"schema\": \"cachesweep/1\",\n  \"mode\": \"auto\",\n");
+			json.w("  \"baseline\": {\"misses\": %" PRIu64 ", \"conflict\": %" PRIu64 "},\n",
+					baseMisses, baseConflict);
+			json.raw("  \"regions\": [");
+		}
 		std::printf("candidate regions, by conflict misses:\n");
+		bool firstRegion = true;
 		for (const Region& r : regions)
 		{
 			const Sym *sym = symbolFor(r.start);
+			if (json)
+			{
+				json.raw(firstRegion ? "\n    " : ",\n    ");
+				firstRegion = false;
+				json.w("{\"start\": \"0x%08x\", \"end\": \"0x%08x\","
+						" \"conflict\": %" PRIu64 ", \"symbol\": ",
+						r.start, r.end, r.conflict);
+				if (sym != nullptr)
+					json.str(sym->name.c_str());
+				else
+					json.raw("null");
+				json.raw("}");
+			}
 			std::printf("  %08x-%08x  %10" PRIu64 " conflict (%.1f%% of all)%s%s\n",
 					r.start, r.end, r.conflict,
 					baseConflict == 0 ? 0.0 : 100.0 * r.conflict / baseConflict,
@@ -1177,6 +1416,8 @@ int main(int argc, char *argv[])
 					sym != nullptr ? sym->name.c_str() : "");
 		}
 		std::printf("\n");
+		json.raw(firstRegion ? "],\n  \"candidates\": [" : "\n  ],\n  \"candidates\": [");
+		bool firstCand = true;
 
 		// Shifting a region models inserting padding before it, so everything
 		// above moves with it. Sweeping a whole cache size covers every
@@ -1208,6 +1449,17 @@ int main(int argc, char *argv[])
 				std::printf("  %+7" PRId64 "  %12" PRIu64 " misses  %12" PRIu64 " conflict  %+7.2f%%\n",
 						delta, res.misses, res.conflict,
 						baseMisses == 0 ? 0.0 : 100.0 * ((double)res.misses - baseMisses) / baseMisses);
+				if (json)
+				{
+					json.raw(firstCand ? "\n    " : ",\n    ");
+					firstCand = false;
+					json.w("{\"region\": \"0x%08x\", \"pad\": %" PRId64
+							", \"misses\": %" PRIu64 ", \"conflict\": %" PRIu64
+							", \"vs_baseline\": %.5f}",
+							r.start, delta, res.misses, res.conflict,
+							baseMisses == 0 ? 0.0
+									: ((double)res.misses - baseMisses) / baseMisses);
+				}
 				if (res.misses < bestMisses)
 				{
 					bestMisses = res.misses;
@@ -1221,12 +1473,22 @@ int main(int argc, char *argv[])
 					100.0 * (baseMisses - bestMisses) / baseMisses);
 		else
 			std::printf("\nno candidate beat the measured layout\n");
+		json.raw(firstCand ? "],\n" : "\n  ],\n");
+		if (best.end != 0)
+			json.w("  \"best\": {\"region\": \"0x%08x\", \"pad\": %" PRId64
+					", \"misses\": %" PRIu64 ", \"vs_baseline\": %.5f}\n}\n",
+					best.start, best.delta, bestMisses,
+					-(double)(baseMisses - bestMisses) / baseMisses);
+		else
+			json.raw("  \"best\": null\n}\n");
+		json.close();
 		return 0;
 	}
 
 	if (!opt.sweep)
 	{
 		reportDetail(trace, opt);
+		json.close();
 		return 0;
 	}
 
@@ -1238,6 +1500,16 @@ int main(int argc, char *argv[])
 	std::printf("baseline: %" PRIu64 " misses (%" PRIu64 " conflict) over %" PRIu64 " fetches\n\n",
 			baseline.misses, baseline.conflict, baseline.fetches);
 	std::printf("%12s %12s %12s %9s %9s\n", "delta", "misses", "conflict", "vs base", "conflict");
+	if (json)
+	{
+		json.w("{\n  \"schema\": \"cachesweep/1\",\n  \"mode\": \"sweep\",\n");
+		json.w("  \"region\": {\"start\": \"0x%08x\", \"end\": \"0x%08x\"},\n",
+				opt.shift.start, opt.shift.end);
+		json.w("  \"baseline\": {\"misses\": %" PRIu64 ", \"conflict\": %" PRIu64
+				", \"fetches\": %" PRIu64 "},\n  \"rows\": [",
+				baseline.misses, baseline.conflict, baseline.fetches);
+	}
+	bool firstRow = true;
 
 	int64_t bestDelta = 0;
 	u64 bestMisses = baseline.misses;
@@ -1250,6 +1522,16 @@ int main(int argc, char *argv[])
 				delta, r.misses, r.conflict,
 				baseline.misses == 0 ? 0.0 : 100.0 * ((double)r.misses - baseline.misses) / baseline.misses,
 				baseline.conflict == 0 ? 0.0 : 100.0 * ((double)r.conflict - baseline.conflict) / baseline.conflict);
+		if (json)
+		{
+			json.raw(firstRow ? "\n    " : ",\n    ");
+			firstRow = false;
+			json.w("{\"delta\": %" PRId64 ", \"misses\": %" PRIu64
+					", \"conflict\": %" PRIu64 ", \"vs_baseline\": %.5f}",
+					delta, r.misses, r.conflict,
+					baseline.misses == 0 ? 0.0
+							: ((double)r.misses - baseline.misses) / baseline.misses);
+		}
 		if (r.misses < bestMisses)
 		{
 			bestMisses = r.misses;
@@ -1264,5 +1546,10 @@ int main(int argc, char *argv[])
 				bestDelta, bestMisses, 100.0 * (baseline.misses - bestMisses) / baseline.misses);
 	else
 		std::printf("\nno candidate beat the measured layout\n");
+	json.w("\n  ],\n  \"best\": {\"delta\": %" PRId64 ", \"misses\": %" PRIu64
+			", \"vs_baseline\": %.5f}\n}\n",
+			bestDelta, bestMisses,
+			baseline.misses == 0 ? 0.0 : -(double)(baseline.misses - bestMisses) / baseline.misses);
+	json.close();
 	return 0;
 }
