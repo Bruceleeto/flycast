@@ -110,6 +110,22 @@ void logSummary()
 				window.writebacks,
 				windowCycles == 0 ? 0.0 : 100.0 * window.missCycles[data] / windowCycles);
 	}
+
+	// Store queue flushes. Counted, not charged: the per-flush cost is a
+	// hardware measurement still in progress, and this count is the
+	// denominator that turns a measured frz_dc figure into cycles per flush.
+	{
+		const u64 ram = window.sqFlushes[(int)SqDest::Ram];
+		const u64 ta = window.sqFlushes[(int)SqDest::Ta];
+		const u64 other = window.sqFlushes[(int)SqDest::Other];
+		if (ram + ta + other != 0)
+			NOTICE_LOG(SH4, "cachesim frame %" PRIu64 " store queue window: %" PRIu64 " flushes"
+					" (%" PRIu64 " ram, %" PRIu64 " ta, %" PRIu64 " other) = %" PRIu64 " bytes"
+					" | not charged, see plan 9e",
+					frameCount(), ram + ta + other, ram, ta, other,
+					(ram + ta + other) * 32);
+	}
+
 	markLogWindow();
 }
 
@@ -126,30 +142,84 @@ void logProfile(size_t limit)
 	NOTICE_LOG(SH4, "cachesim per-function profile, per frame"
 			" (pipeline cycles are issue+interlock, hardware-checked;"
 			" cache columns are derived from miss counts)");
-	NOTICE_LOG(SH4, "  %-34s %9s %7s %8s %8s %8s %8s %9s",
+	NOTICE_LOG(SH4, "  %-34s %9s %7s %8s %8s %8s %8s %8s %9s",
 			"function", "cycles", "%frame", "flow-dep", "resource", "stage",
-			"icache", "calls");
+			"icache", "storeq", "calls");
 
 	for (const ProfileRow& r : rows)
 	{
 		const double pipe = r.pipeCycles > 0.0 ? r.pipeCycles : r.cycles;
-		const double total = pipe + r.missCycles + r.dataMissCycles;
+		// Store queue cycles are in; operand cache cycles are excluded on
+		// purpose. See the ranking comment in profile().
+		const double total = pipe + r.missCycles + r.sqCycles;
 		if (total < 1.0)
 			continue;
 		// Stall columns are events, so they are shown as a share of this row's
 		// own stalls rather than as cycles, which they are not.
 		const double ev = r.pipeFlowDep + r.pipeResource + r.pipeStage;
-		NOTICE_LOG(SH4, "  %-34s %9.0f %6.1f%% %7.0f%% %7.0f%% %7.0f%% %8.0f %9.1f%s",
+		NOTICE_LOG(SH4, "  %-34s %9.0f %6.1f%% %7.0f%% %7.0f%% %7.0f%% %8.0f %8.0f %9.1f%s",
 				r.name.c_str(), total,
 				frameCycles == 0.0 ? 0.0 : 100.0 * total / frameCycles,
 				ev == 0.0 ? 0.0 : 100.0 * r.pipeFlowDep / ev,
 				ev == 0.0 ? 0.0 : 100.0 * r.pipeResource / ev,
 				ev == 0.0 ? 0.0 : 100.0 * r.pipeStage / ev,
-				r.missCycles, r.calls,
+				r.missCycles, r.sqCycles, r.calls,
 				r.pipeComplete ? "" : " *");
 	}
 	NOTICE_LOG(SH4, "  (* = a block in this row had an opcode with no pipeline"
 			" data and was charged its issue rate with no stalls)");
+}
+
+// Per-block breakdown. The per-function table cannot see inside a renderer's
+// main loop, because the whole loop is one inlined symbol. This can.
+void logBlocks(size_t limit)
+{
+	struct Row
+	{
+		u32 vaddr;
+		u32 size;
+		double execs;
+		double cycles;
+		double sqCycles;
+		u32 pipeCycles;
+		u16 flowDep, resource, stage;
+		bool modelled;
+	};
+	std::vector<Row> rows;
+	const double sqCost = penaltyConfig().sqFlushCycles;
+	for (const BlockTrace& b : blocks())
+	{
+		const double execs = blockExecsPerFrame(b.id);
+		if (execs < 0.5)
+			continue;
+		const double sq = blockSqFlushesPerFrame(b.id) * sqCost;
+		rows.push_back({ b.vaddr, b.size, execs, execs * b.pipeCycles + sq, sq,
+				b.pipeCycles,
+				b.pipeByReason[(int)pipesim::StallReason::FlowDep],
+				b.pipeByReason[(int)pipesim::StallReason::ResourceHazard],
+				b.pipeByReason[(int)pipesim::StallReason::StageFull]
+						+ b.pipeByReason[(int)pipesim::StallReason::StageLocked],
+				b.pipeModelled });
+	}
+	if (rows.empty())
+		return;
+	std::sort(rows.begin(), rows.end(),
+			[](const Row& a, const Row& b) { return a.cycles > b.cycles; });
+	if (rows.size() > limit)
+		rows.resize(limit);
+
+	const double frameCycles = profileFrameCycles();
+	NOTICE_LOG(SH4, "cachesim per-block profile, per frame"
+			" (cyc/exec is one execution, steady state)");
+	NOTICE_LOG(SH4, "  %-10s %5s %9s %7s %9s %8s %8s %8s %8s %8s",
+			"address", "bytes", "cycles", "%frame", "execs", "cyc/exec",
+			"flow-dep", "resource", "stage", "storeq");
+	for (const Row& r : rows)
+		NOTICE_LOG(SH4, "  %08x   %5u %9.0f %6.1f%% %9.0f %8u %8u %8u %8u %8.0f%s",
+				r.vaddr, r.size, r.cycles,
+				frameCycles == 0.0 ? 0.0 : 100.0 * r.cycles / frameCycles,
+				r.execs, r.pipeCycles, r.flowDep, r.resource, r.stage,
+				r.sqCycles, r.modelled ? "" : " *");
 }
 
 bool writeReport(const std::string& path)
@@ -259,6 +329,9 @@ bool writeReport(const std::string& path)
 	// Dirty lines written out. Counted, and charged only if a writeback cost
 	// has been set: the write-back buffer hides most of it.
 	fprintf(f, "    \"writebacks\": %" PRIu64 ",\n", c.writebacks);
+	fprintf(f, "    \"sq_flushes_ram\": %" PRIu64 ",\n", c.sqFlushes[(int)SqDest::Ram]);
+	fprintf(f, "    \"sq_flushes_ta\": %" PRIu64 ",\n", c.sqFlushes[(int)SqDest::Ta]);
+	fprintf(f, "    \"sq_flushes_other\": %" PRIu64 ",\n", c.sqFlushes[(int)SqDest::Other]);
 	fprintf(f, "    \"writeback_cycles\": %.1f,\n", c.writebackCycles);
 	fprintf(f, "    \"miss_rate_per_access\": %.6f,\n",
 			c.dataAccesses == 0 ? 0.0 : (double)c.misses[data] / c.dataAccesses);

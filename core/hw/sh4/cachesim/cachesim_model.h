@@ -104,10 +104,42 @@ struct PenaltyConfig
 	// buffer is still busy. Charging a full line burst here would overstate it,
 	// so the count is reported and the cycles are left to whoever measures them.
 	double writebackCycles = 0.0;
+	// Cycles the CPU actually stalls per 32-byte store queue flush.
+	//
+	// This is NOT the transfer time. A flush is asynchronous: the CPU only
+	// freezes when the next flush finds the queue still draining, and real
+	// code alternates SQ0 and SQ1 so most of the drain overlaps with work.
+	// So this is the residual stall, and it depends on how much work the
+	// guest puts between flushes.
+	//
+	// 3.6 is measured: a Dreamcast running bruces_balls freezes 278,207
+	// cycles per frame on the data-cache counter, against 77,100 flushes per
+	// frame counted here, and its 188 operand cache misses account for about
+	// 1% of that. Serialised with no work in between it is 11.1 (the RAM
+	// figure from the sqprobe harness), which is the upper bound.
+	double sqFlushCycles = 3.6;
+};
+
+// Where a store queue flush landed. The SH4 drains a 32-byte queue to an
+// external bus, and the cost depends entirely on the destination: RAM behaves
+// like a burst write, the TA can back up behind the tile accelerator. Not a
+// cache stream - store queue writes bypass the operand cache entirely, which
+// hardware confirms (a flush to RAM produces exactly zero operand cache
+// misses), so they are counted separately rather than folded into Data.
+enum class SqDest : u8
+{
+	Ram,		// area 3, system RAM
+	Ta,			// area 4, tile accelerator / PVR
+	Other,
+	Count
 };
 
 struct Counters
 {
+	// Store queue flushes, one per 32 bytes, split by destination. Counts only:
+	// no cycles are charged yet, because the per-flush cost is still being
+	// measured on hardware. See plan.md 9e.
+	u64 sqFlushes[(int)SqDest::Count];
 	u64 instFetched;
 	// 32-bit fetch accesses, which is what an SH4 fetch counter counts: the
 	// fetch unit reads 32 bits at a time, so one access covers up to two
@@ -569,6 +601,8 @@ public:
 	}
 
 	void countDataAccess() { total.dataAccesses++; }
+
+	void countSqFlush(SqDest dest) { total.sqFlushes[(int)dest]++; }
 
 	// Operand cache index. The same decode flycast's own cache implements, kept
 	// identical on purpose: RAM mode steals the half of the cache selected by

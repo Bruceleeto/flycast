@@ -86,6 +86,11 @@ struct State
 	std::vector<u64> dataMissCount;
 	std::vector<u64> dataMissAtFrame;
 	std::vector<double> dataMissPerFrame;
+	// Store queue flushes, attributed the same way: to the block that was
+	// running when the queue drained.
+	std::vector<u64> sqFlushCount;
+	std::vector<u64> sqFlushAtFrame;
+	std::vector<double> sqFlushPerFrame;
 	// The block currently executing, so a data access can be charged to it. The
 	// dynarec calls traceBlock on entry, and a block runs to completion.
 	u32 currentBlock = 0xffffffff;
@@ -211,6 +216,9 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.dataMissCount.resize(size, 0);
 		st.dataMissAtFrame.resize(size, 0);
 		st.dataMissPerFrame.resize(size, 0.0);
+		st.sqFlushCount.resize(size, 0);
+		st.sqFlushAtFrame.resize(size, 0);
+		st.sqFlushPerFrame.resize(size, 0.0);
 	}
 	st.execCount[bt->id]++;
 	// Pipeline cycles are a property of the block, so this is a multiply, not
@@ -247,6 +255,15 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 // cache implements in sh4_cache.h, deliberately: two decodes of the same
 // hardware that disagree would be a bug nobody would see.
 //
+void sqFlush(u32 area)
+{
+	State& st = state();
+	st.model.countSqFlush(area == 4 ? SqDest::Ta
+			: area == 3 ? SqDest::Ram : SqDest::Other);
+	if (st.currentBlock < st.sqFlushCount.size())
+		st.sqFlushCount[st.currentBlock]++;
+}
+
 void DYNACALL dataAccess(u32 vaddr, u32 packed)
 {
 	State& st = state();
@@ -376,12 +393,15 @@ void frameBoundary()
 		const double execs = (double)(st.execCount[i] - st.execAtFrame[i]);
 		const double misses = (double)(st.missCount[i] - st.missAtFrame[i]);
 		const double dmisses = (double)(st.dataMissCount[i] - st.dataMissAtFrame[i]);
+		const double sqf = (double)(st.sqFlushCount[i] - st.sqFlushAtFrame[i]);
 		st.execAtFrame[i] = st.execCount[i];
 		st.missAtFrame[i] = st.missCount[i];
 		st.dataMissAtFrame[i] = st.dataMissCount[i];
+		st.sqFlushAtFrame[i] = st.sqFlushCount[i];
 		st.execPerFrame[i] += alpha * (execs - st.execPerFrame[i]);
 		st.missPerFrame[i] += alpha * (misses - st.missPerFrame[i]);
 		st.dataMissPerFrame[i] += alpha * (dmisses - st.dataMissPerFrame[i]);
+		st.sqFlushPerFrame[i] += alpha * (sqf - st.sqFlushPerFrame[i]);
 	}
 	st.smoothedFrameCycles += alpha * ((double)st.frameCycles - st.smoothedFrameCycles);
 
@@ -406,6 +426,7 @@ void frameBoundary()
 		st.done = true;
 		logSummary();
 		logProfile();
+		logBlocks();
 		if (!reportPath.empty())
 			writeReport(reportPath);
 		traceClose();
@@ -511,6 +532,9 @@ void reset()
 	std::fill(st.dataMissCount.begin(), st.dataMissCount.end(), 0);
 	std::fill(st.dataMissAtFrame.begin(), st.dataMissAtFrame.end(), 0);
 	std::fill(st.dataMissPerFrame.begin(), st.dataMissPerFrame.end(), 0.0);
+	std::fill(st.sqFlushCount.begin(), st.sqFlushCount.end(), 0);
+	std::fill(st.sqFlushAtFrame.begin(), st.sqFlushAtFrame.end(), 0);
+	std::fill(st.sqFlushPerFrame.begin(), st.sqFlushPerFrame.end(), 0.0);
 	st.dataTranslationFailures = 0;
 	st.chargeRemainder = 0;
 	st.chargedCycles = 0;
@@ -617,6 +641,18 @@ const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles)
 	return &st.blockPool.back();
 }
 
+double blockExecsPerFrame(u32 id)
+{
+	const State& st = state();
+	return id < st.execPerFrame.size() ? st.execPerFrame[id] : 0.0;
+}
+
+double blockSqFlushesPerFrame(u32 id)
+{
+	const State& st = state();
+	return id < st.sqFlushPerFrame.size() ? st.sqFlushPerFrame[id] : 0.0;
+}
+
 const std::deque<BlockTrace>& blocks() { return state().blockPool; }
 
 PipeTotals pipeTotals()
@@ -645,6 +681,8 @@ static Counters since(const Counters& base)
 	delta.instFetched -= base.instFetched;
 	delta.fetchOps -= base.fetchOps;
 	delta.invalidations -= base.invalidations;
+	for (int d = 0; d < (int)SqDest::Count; d++)
+		delta.sqFlushes[d] -= base.sqFlushes[d];
 	for (int s = 0; s < (int)Stream::Count; s++)
 	{
 		delta.lineTouches[s] -= base.lineTouches[s];
@@ -748,6 +786,8 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.cycles += st.execPerFrame[i] * block.guestCycles;
 		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
 		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerMiss;
+		row.sqFlushes += st.sqFlushPerFrame[i];
+		row.sqCycles += st.sqFlushPerFrame[i] * st.model.penalty().sqFlushCycles;
 
 		// Pipeline cycles are per execution and already steady-state, so this
 		// is the same multiply the run totals use.
@@ -767,13 +807,29 @@ std::vector<ProfileRow> profile(size_t limit)
 		out.push_back(std::move(entry.second));
 	// Rank by the pipeline model where it produced anything, since that is the
 	// figure with hardware behind it, and fall back to flycast's own estimate
-	// otherwise. Cache cycles are added in both cases: a row can be cheap to
-	// issue and expensive to fetch.
+	// otherwise. Instruction cache cycles are added: a row can be cheap to
+	// issue and expensive to fetch, and the penalty constant survives contact
+	// with hardware - 16.8 modelled against 26.3 measured on bruces_balls, the
+	// same ballpark as the 16.4 to 17.5 measured on other workloads.
+	//
+	// Store queue cycles are added too. They are a counted event rather than a
+	// modelled one - the hook sits on the flush - and on a workload that feeds
+	// the tile accelerator they are the second largest term after issue: 77,100
+	// flushes per frame at 3.6 cycles is 8% of the frame, and before this was
+	// hooked none of it appeared anywhere.
+	//
+	// Operand cache cycles are still deliberately NOT added. The data-side
+	// pipeline freeze hardware reports is now accounted for by the store queue
+	// above rather than by line fills, which is what made the old 1,483 cycles
+	// per miss look absurd. What remains is a smaller and more ordinary problem
+	// - the model counts about half the operand cache misses hardware does - and
+	// until that is fixed the miss count is the wrong denominator to build a
+	// cycle figure on. See phase 9e in docs/cachesim/plan.md.
 	std::sort(out.begin(), out.end(), [](const ProfileRow& a, const ProfileRow& b) {
 		const double ta = (a.pipeCycles > 0.0 ? a.pipeCycles : a.cycles)
-				+ a.missCycles + a.dataMissCycles;
+				+ a.missCycles + a.sqCycles;
 		const double tb = (b.pipeCycles > 0.0 ? b.pipeCycles : b.cycles)
-				+ b.missCycles + b.dataMissCycles;
+				+ b.missCycles + b.sqCycles;
 		return ta > tb;
 	});
 	if (out.size() > limit)

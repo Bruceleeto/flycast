@@ -132,6 +132,12 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed);
 // Per-instruction feed, used by the interpreter.
 void traceFetch(u32 vaddr, u32 paddr, u32 bytes);
 
+// A store queue flush: 32 bytes leaving the CPU for `area`. Called from
+// storeq.cpp, once per flush, only while armed. Counted rather than charged -
+// the per-flush cost is not modelled yet - but the count is the denominator
+// needed to turn a hardware frz_dc measurement into a per-flush figure.
+void sqFlush(u32 area);
+
 // Guest-driven invalidation. The instruction cache is not coherent with writes
 // to memory, so these are the ONLY things that drop lines: flycast's own block
 // invalidation must not be mirrored here.
@@ -148,6 +154,10 @@ void frameBoundary();
 // Repeated compilations of the same block return the same descriptor, so the
 // pool is bounded by distinct guest code, not by recompilation churn.
 const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles);
+// Per-frame execution count and store queue flushes for a block, by id. For
+// block-level reporting; 0 for a block that has not run recently.
+double blockExecsPerFrame(u32 id);
+double blockSqFlushesPerFrame(u32 id);
 const std::deque<BlockTrace>& blocks();
 
 //
@@ -201,6 +211,12 @@ struct ProfileRow
 	double dataMissCycles;	// of which, operand cache fill. Zero unless the data
 			// feed is on, which costs speed and so is opt-in
 	double calls;		// block entries per frame
+	// Store queue flushes per frame, and what they cost. Unlike the cache
+	// columns this is a direct count of a real event rather than a modelled
+	// one - the hook is on the flush itself - so only the per-flush cycle
+	// figure is an estimate. See PenaltyConfig::sqFlushCycles.
+	double sqFlushes;
+	double sqCycles;
 
 	// Pipeline model, per frame. Unlike `cycles` above - which is flycast's
 	// own issue estimate and is good for ranking only - these come from the
@@ -228,6 +244,12 @@ std::vector<ProfileRow> profile(size_t limit);
 // The difference is the CPU waiting: idle, asleep, or spinning somewhere that
 // never executed a block. Without it the percentages would silently be shares
 // of work done rather than shares of the frame.
+//
+// Note this is FLYCAST'S frame, and flycast does not stall on the store queue
+// at all, so a row's percentage can exceed 100 on a workload that feeds the
+// tile accelerator hard. That is not a bug in the row: it is the size of the
+// gap between what flycast charges and what hardware does, and it is most of
+// why bruces_balls runs at 60fps here and 30fps on a Dreamcast.
 double profileFrameCycles();
 double profileAccountedCycles();
 
@@ -237,6 +259,11 @@ double profileAccountedCycles();
 void logSummary();
 // Per-function table: where the frame goes, ranked, with a stall breakdown.
 void logProfile(size_t limit = 24);
+// Per-BLOCK breakdown, hottest first. The per-function table groups by symbol,
+// which says nothing about a function that has been inlined into one enormous
+// loop - the common case for a renderer. This drops to the block, so a hot
+// span inside a function can be found and mapped back to source with addr2line.
+void logBlocks(size_t limit = 24);
 bool writeReport(const std::string& path);
 void setReportPath(const std::string& path);
 
