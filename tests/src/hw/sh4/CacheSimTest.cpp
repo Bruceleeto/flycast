@@ -52,12 +52,13 @@ constexpr u32 RAM = 0x0c000000;
 // and a set for "seen before". If this and the simulator agree on a few million
 // accesses, the simulator's indexing, LRU and classification are right.
 //
-class ReferenceICache
+template<u32 SETS>
+class ReferenceCache
 {
 public:
 	void access(u32 lineAddr)
 	{
-		const u32 index = (lineAddr >> 5) & (IC_SETS - 1);
+		const u32 index = (lineAddr >> 5) & (SETS - 1);
 
 		const bool dmHit = valid[index] && lines[index] == lineAddr;
 
@@ -66,7 +67,7 @@ public:
 		if (shadowHit)
 			lru.erase(it);
 		lru.push_front(lineAddr);
-		if (lru.size() > IC_SETS)
+		if (lru.size() > SETS)
 			lru.pop_back();
 
 		if (dmHit)
@@ -91,8 +92,8 @@ public:
 	u64 conflict = 0;
 
 private:
-	u32 lines[IC_SETS] = {};
-	bool valid[IC_SETS] = {};
+	u32 lines[SETS] = {};
+	bool valid[SETS] = {};
 	std::list<u32> lru;
 	std::unordered_set<u32> seen;
 };
@@ -116,11 +117,20 @@ protected:
 
 	static u64 misses() { return counters().misses[(int)Stream::Inst]; }
 	static u64 kind(MissKind k) { return counters().missKinds[(int)Stream::Inst][(int)k]; }
+	static u64 dataMisses() { return counters().misses[(int)Stream::Data]; }
+	static u64 dataKind(MissKind k) { return counters().missKinds[(int)Stream::Data][(int)k]; }
+
+	// One guest load or store, as the compiled code would issue it
+	static void load(u32 addr, u32 size = 4) { dataAccess(addr, size); }
+	static void store(u32 addr, u32 size = 4) { dataAccess(addr, size | 0x100); }
+
+	// P0, so that the write policy comes from CCR.WT rather than CCR.CB
+	static constexpr u32 P0 = 0x0c000000;
 };
 
 TEST_F(CacheSimTest, AgreesWithReferenceModel)
 {
-	ReferenceICache ref;
+	ReferenceCache<IC_SETS> ref;
 	std::mt19937 rng(12345);
 	// A spread wider than the cache, so the stream contains all three kinds
 	std::uniform_int_distribution<u32> offset(0, 64_KB - 1);
@@ -386,3 +396,121 @@ TEST_F(CacheSimTest, FrameCountersMeasureOneFrame)
 }
 
 } // namespace
+
+//
+// Operand cache
+//
+// The write policy is the part that cannot be inferred from a miss count: in
+// write-through mode a store that misses does not bring the line in at all, so
+// a model that allocates on every store invents misses in exactly the guests
+// that were careful to avoid them.
+//
+TEST_F(CacheSimTest, WriteThroughStoreDoesNotAllocate)
+{
+	CCN_CCR.OCE = 1;
+	CCN_CCR.WT = 1;
+
+	store(P0 + 0x1000);
+	EXPECT_EQ(0u, dataMisses());
+	EXPECT_EQ(1u, counters().writeThroughMisses);
+
+	// The line was never brought in, so reading it now is the first miss
+	load(P0 + 0x1000);
+	EXPECT_EQ(1u, dataMisses());
+	EXPECT_EQ(1u, dataKind(MissKind::Compulsory));
+}
+
+TEST_F(CacheSimTest, CopyBackStoreAllocatesAndWritesBackWhenEvicted)
+{
+	CCN_CCR.OCE = 1;
+	CCN_CCR.WT = 0;
+
+	store(P0 + 0x1000);
+	EXPECT_EQ(1u, dataMisses());
+	EXPECT_EQ(0u, counters().writeThroughMisses);
+
+	// Allocated, so reading it back hits
+	load(P0 + 0x1000);
+	EXPECT_EQ(1u, dataMisses());
+
+	// Evict it with a line that lands in the same set: the dirty line has to be
+	// written out
+	EXPECT_EQ(0u, counters().writebacks);
+	load(P0 + 0x1000 + OC_SETS * LINE_BYTES);
+	EXPECT_EQ(1u, counters().writebacks);
+}
+
+TEST_F(CacheSimTest, WriteThroughHitLeavesTheLineClean)
+{
+	CCN_CCR.OCE = 1;
+	CCN_CCR.WT = 1;
+
+	load(P0 + 0x2000);			// allocates, clean
+	store(P0 + 0x2000);			// hit, written through: still clean
+	load(P0 + 0x2000 + OC_SETS * LINE_BYTES);	// evicts it
+
+	EXPECT_EQ(0u, counters().writebacks);
+}
+
+TEST_F(CacheSimTest, AccessSpanningTwoLinesTouchesBoth)
+{
+	CCN_CCR.OCE = 1;
+
+	// Four bytes starting two bytes before a line boundary
+	load(P0 + LINE_BYTES - 2, 4);
+	EXPECT_EQ(2u, dataMisses());
+	EXPECT_EQ(1u, counters().dataAccesses);
+}
+
+TEST_F(CacheSimTest, RamModeTakesHalfTheCacheOutOfService)
+{
+	CCN_CCR.OCE = 1;
+	CCN_CCR.ORA = 1;
+
+	// Area 3 is forced into the RAM half, which is not a cache access at all
+	const u64 before = counters().lineTouches[(int)Stream::Data];
+	load(0x60000000);
+	EXPECT_EQ(before, counters().lineTouches[(int)Stream::Data]);
+	EXPECT_EQ(0u, dataMisses());
+	// Still counted as an access the guest made: the denominator must not
+	// quietly shrink
+	EXPECT_EQ(1u, counters().dataAccesses);
+}
+
+TEST_F(CacheSimTest, UncachedDataIsNotModelled)
+{
+	CCN_CCR.OCE = 0;
+	load(P0);
+	EXPECT_EQ(0u, dataMisses());
+	EXPECT_EQ(1u, counters().uncachedAccesses[(int)Stream::Data]);
+}
+
+TEST_F(CacheSimTest, DataAgreesWithReferenceModel)
+{
+	CCN_CCR.OCE = 1;
+	CCN_CCR.WT = 0;			// copy-back, so every access allocates and the
+							// reference does not need a write policy of its own
+
+	ReferenceCache<OC_SETS> ref;
+	std::mt19937 rng(999);
+	// Wider than the 16 KB cache, so the stream contains all three kinds
+	std::uniform_int_distribution<u32> offset(0, 128_KB - 1);
+	std::uniform_int_distribution<u32> write(0, 1);
+
+	for (int i = 0; i < 200000; i++)
+	{
+		const u32 addr = P0 + (offset(rng) & ~3u);
+		if (write(rng))
+			store(addr);
+		else
+			load(addr);
+		ref.access(addr & ~(LINE_BYTES - 1));
+	}
+
+	EXPECT_EQ(ref.misses, dataMisses());
+	EXPECT_EQ(ref.compulsory, dataKind(MissKind::Compulsory));
+	EXPECT_EQ(ref.capacity, dataKind(MissKind::Capacity));
+	EXPECT_EQ(ref.conflict, dataKind(MissKind::Conflict));
+	EXPECT_GT(dataKind(MissKind::Conflict), 0u);
+	EXPECT_GT(dataKind(MissKind::Capacity), 0u);
+}

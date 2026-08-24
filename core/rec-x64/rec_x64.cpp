@@ -244,6 +244,7 @@ public:
 							add(call_regs[0], dword[rax]);
 						}
 					}
+					genDataCacheHook(op, false);
 					genMmuLookup(block, op, 0);
 
 					int size = op.size == 1 ? MemSize::S8 : op.size == 2 ? MemSize::S16 : op.size == 4 ? MemSize::S32 : MemSize::S64;
@@ -281,6 +282,7 @@ public:
 							add(call_regs[0], dword[rax]);
 						}
 					}
+					genDataCacheHook(op, true);
 					genMmuLookup(block, op, 1);
 
 #if ALLOC_F64 == false
@@ -824,6 +826,26 @@ public:
 	}
 
 private:
+	// Guest operand cache feed. Emitted before the address is translated,
+	// because the cache index comes from the virtual address while the tag comes
+	// from the physical one, and only the untranslated address is still in a
+	// register at this point - the model does its own lookup for the rest.
+	//
+	// call_regs[0] already holds the guest address. It and the scratch register
+	// are preserved across the call; everything the register allocator uses is
+	// callee-saved on both ABIs, and GenCall spills the mapped xmm registers.
+	void genDataCacheHook(const shil_opcode& op, bool write)
+	{
+		if (!cachesim::dataFeed())
+			return;
+		push(call_regs64[0]);
+		push(rax);		// no value of ours, but it keeps rsp 16-byte aligned
+		mov(call_regs[1], op.size | (write ? 0x100 : 0));
+		GenCall(cachesim::dataAccess);
+		pop(rax);
+		pop(call_regs64[0]);
+	}
+
 	void genMmuLookup(const RuntimeBlockInfo* block, const shil_opcode& op, u32 write)
 	{
 		if (mmu_enabled())
@@ -862,6 +884,11 @@ private:
 	bool GenReadMemImmediate(const shil_opcode& op, RuntimeBlockInfo* block)
 	{
 		if (!op.rs1.is_imm())
+			return false;
+		// This path inlines the access and never reaches a hook. Declining it
+		// costs speed in a profiling run and keeps the feed complete, which is
+		// the trade the whole mode already makes.
+		if (cachesim::dataFeed())
 			return false;
 		void *ptr;
 		bool isram;
@@ -985,6 +1012,8 @@ private:
 	bool GenWriteMemImmediate(const shil_opcode& op, RuntimeBlockInfo* block)
 	{
 		if (!op.rs1.is_imm())
+			return false;
+		if (cachesim::dataFeed())
 			return false;
 		void *ptr;
 		bool isram;

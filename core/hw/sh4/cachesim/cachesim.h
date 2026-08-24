@@ -59,6 +59,11 @@ struct BlockTrace
 // a cross-translation-unit call. Use armed(), not the variable.
 extern bool g_armed;
 inline bool armed() { return g_armed; }
+// Whether guest loads and stores are fed to the operand cache model. Separate
+// from armed() because it costs a call per access, and because the instruction
+// cache answers most questions on its own.
+extern bool g_dataFeed;
+inline bool dataFeed() { return g_dataFeed; }
 // Applies the config options. Must run before any block is translated.
 void init();
 // Only takes effect for blocks compiled afterwards, so the caller must reset
@@ -95,6 +100,10 @@ bool finished();
 // translated block is straight-line, so its fetch stream is exactly its address
 // range.
 void DYNACALL traceBlock(const BlockTrace *bt);
+// Guest data access feed, called from compiled code before each load or store.
+// `packed` is the access size in bytes with bit 8 set for a write. Only emitted
+// into blocks compiled while armed, so arming must reset the code cache.
+void DYNACALL dataAccess(u32 vaddr, u32 packed);
 // Per-instruction feed, used by the interpreter.
 void traceFetch(u32 vaddr, u32 paddr, u32 bytes);
 
@@ -151,6 +160,8 @@ struct ProfileRow
 	u32 end;
 	double cycles;		// per frame, estimated: see the caveat below
 	double missCycles;	// of which, icache fill. Derived from miss counts
+	double dataMissCycles;	// of which, operand cache fill. Zero unless the data
+			// feed is on, which costs speed and so is opt-in
 	double calls;		// block entries per frame
 	bool named;
 };

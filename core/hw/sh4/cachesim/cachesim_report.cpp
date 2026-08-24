@@ -69,6 +69,20 @@ void logSummary()
 			c.instFetched == 0 ? 0.0 : 100.0 * c.misses[inst] / c.instFetched,
 			cycles == 0 ? 0.0 : 100.0 * c.missCycles[inst] / cycles,
 			penaltyModelName(penaltyConfig().model));
+	if (dataFeed())
+	{
+		const int data = (int)Stream::Data;
+		NOTICE_LOG(SH4, "cachesim frame %" PRIu64 " ocache window: %" PRIu64 " misses"
+				" (%.3f%% of %" PRIu64 " accesses) %" PRIu64 "%% conflict"
+				" | %" PRIu64 " writebacks | derived %.1f%% of guest cycles",
+				frameCount(), window.misses[data],
+				window.dataAccesses == 0 ? 0.0 : 100.0 * window.misses[data] / window.dataAccesses,
+				window.dataAccesses,
+				window.misses[data] == 0 ? 0
+						: window.missKinds[data][(int)MissKind::Conflict] * 100 / window.misses[data],
+				window.writebacks,
+				windowCycles == 0 ? 0.0 : 100.0 * window.missCycles[data] / windowCycles);
+	}
 	markLogWindow();
 }
 
@@ -145,6 +159,38 @@ bool writeReport(const std::string& path)
 			cycles == 0 ? 0.0 : c.missCycles[inst] / cycles);
 	fprintf(f, "  },\n");
 
+	// Operand cache. Present whether or not the feed was on: all zeroes says
+	// "not measured", and a reader that cannot tell the difference between
+	// "no misses" and "not looked at" would draw the wrong conclusion from a
+	// missing section.
+	const int data = (int)Stream::Data;
+	fprintf(f, "  \"ocache\": {\n");
+	fprintf(f, "    \"measured\": %s,\n", dataFeed() ? "true" : "false");
+	fprintf(f, "    \"sets\": %u, \"line_bytes\": %u, \"bytes\": %u,\n",
+			OC_SETS, LINE_BYTES, OC_SETS * LINE_BYTES);
+	fprintf(f, "    \"accesses\": %" PRIu64 ",\n", c.dataAccesses);
+	fprintf(f, "    \"line_touches\": %" PRIu64 ",\n", c.lineTouches[data]);
+	fprintf(f, "    \"uncached_accesses\": %" PRIu64 ",\n", c.uncachedAccesses[data]);
+	fprintf(f, "    \"misses\": %" PRIu64 ",\n", c.misses[data]);
+	fprintf(f, "    \"compulsory\": %" PRIu64 ",\n", c.missKinds[data][(int)MissKind::Compulsory]);
+	fprintf(f, "    \"capacity\": %" PRIu64 ",\n", c.missKinds[data][(int)MissKind::Capacity]);
+	fprintf(f, "    \"conflict\": %" PRIu64 ",\n", c.missKinds[data][(int)MissKind::Conflict]);
+	fprintf(f, "    \"invalidated\": %" PRIu64 ",\n", c.missKinds[data][(int)MissKind::Invalidated]);
+	// Stores that missed a write-through line. Not misses: the line was never
+	// going to be allocated, so no layout change removes them.
+	fprintf(f, "    \"write_through_misses\": %" PRIu64 ",\n", c.writeThroughMisses);
+	// Dirty lines written out. Counted, and charged only if a writeback cost
+	// has been set: the write-back buffer hides most of it.
+	fprintf(f, "    \"writebacks\": %" PRIu64 ",\n", c.writebacks);
+	fprintf(f, "    \"writeback_cycles\": %.1f,\n", c.writebackCycles);
+	fprintf(f, "    \"miss_rate_per_access\": %.6f,\n",
+			c.dataAccesses == 0 ? 0.0 : (double)c.misses[data] / c.dataAccesses);
+	fprintf(f, "    \"misses_per_second\": %.1f,\n", perSecond(c.misses[data], cycles));
+	fprintf(f, "    \"derived_miss_cycles\": %.1f,\n", c.missCycles[data]);
+	fprintf(f, "    \"derived_cycle_fraction\": %.6f\n",
+			cycles == 0 ? 0.0 : c.missCycles[data] / cycles);
+	fprintf(f, "  },\n");
+
 	// The lines that miss most. Address only: naming them is the symbolization
 	// layer's job, and code in a guest JIT buffer has no name to give.
 	fprintf(f, "  \"top_sites\": [\n");
@@ -180,9 +226,11 @@ bool writeReport(const std::string& path)
 	{
 		const ProfileRow& r = rows[i];
 		fprintf(f, "      {\"name\": \"%s\", \"named\": %s, \"start\": \"0x%08x\","
-				" \"cycles\": %.0f, \"icache_cycles\": %.0f, \"calls\": %.1f}%s\n",
+				" \"cycles\": %.0f, \"icache_cycles\": %.0f, \"ocache_cycles\": %.0f,"
+				" \"calls\": %.1f}%s\n",
 				r.name.c_str(), r.named ? "true" : "false", r.start,
-				r.cycles, r.missCycles, r.calls, i + 1 == rows.size() ? "" : ",");
+				r.cycles, r.missCycles, r.dataMissCycles, r.calls,
+				i + 1 == rows.size() ? "" : ",");
 	}
 	fprintf(f, "    ]\n  },\n");
 

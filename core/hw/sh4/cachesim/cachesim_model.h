@@ -98,6 +98,12 @@ struct PenaltyConfig
 	double rowHitCycles = 14.0;
 	double rowMissCycles = 24.0;
 	u32 rowShift = 12;
+	// Evicting a dirty operand cache line writes it out. Counted always,
+	// charged only if this is set: the SH4 has a write-back buffer that hides
+	// most of the cost, and flycast's own timing model only stalls when that
+	// buffer is still busy. Charging a full line burst here would overstate it,
+	// so the count is reported and the cycles are left to whoever measures them.
+	double writebackCycles = 0.0;
 };
 
 struct Counters
@@ -118,6 +124,16 @@ struct Counters
 	u64 uncachedAccesses[(int)Stream::Count];
 	u64 invalidations;
 	double missCycles[(int)Stream::Count];
+	// Guest data accesses seen, the only honest denominator for a data miss
+	// rate. One access can span two lines, so this is not lineTouches[Data].
+	u64 dataAccesses;
+	// Stores that missed a write-through line and so did not allocate. Not
+	// cache misses - the line was never wanted in the cache - but they are the
+	// difference between the access count and what the cache actually saw.
+	u64 writeThroughMisses;
+	// Dirty operand cache lines written out on eviction.
+	u64 writebacks;
+	double writebackCycles;
 };
 
 struct SetStat
@@ -338,6 +354,7 @@ struct Cache
 		for (auto& line : lines)
 		{
 			line.valid = false;
+			line.dirty = false;
 			line.tag = 0;
 			line.lineAddr = INVALID_LINE;
 		}
@@ -372,6 +389,7 @@ struct Cache
 		u32 tag;
 		u32 lineAddr;	// full physical line address, kept so reports are exact
 		bool valid;
+		bool dirty;		// operand cache only: written while in copy-back mode
 	};
 
 	// Bounded top-K of (line, evicted line) pairs. Per-set state for hundreds of
@@ -487,6 +505,86 @@ public:
 		line.tag = tag;
 		line.lineAddr = lineAddr;
 	}
+
+	// One guest load or store against the operand cache.
+	//
+	// Write policy is the part that cannot be guessed at: in copy-back mode a
+	// store that misses fills the line and dirties it, while in write-through
+	// mode it does not allocate at all - the store goes straight out and the
+	// cache is left alone. Modelling every store as an allocation would invent
+	// misses in exactly the guests that avoid them.
+	//
+	// `copyBack` is the caller's decode of CCR.CB / CCR.WT and the page's WT
+	// bit, because only the caller can see the MMU.
+	void touchData(u32 index, u32 lineAddr, u32 pc, bool write, bool copyBack)
+	{
+		Cache& cache = oc;
+		const u32 tag = (lineAddr >> 10) & 0x7ffff;
+
+		total.lineTouches[(int)Stream::Data]++;
+		cache.stats[index].accesses++;
+
+		Cache::Line& line = cache.lines[index];
+		if (line.valid && line.tag == tag)
+		{
+			// A hit still has to refresh the shadow, or its LRU order drifts
+			// away from the recency the classification depends on.
+			cache.shadow.access(lineAddr);
+			if (write && copyBack)
+				line.dirty = true;
+			return;
+		}
+
+		if (write && !copyBack)
+		{
+			// No allocation, and deliberately no shadow touch: an equally large
+			// associative cache would not have held this line either, so
+			// counting it as a miss would put work in front of a layout search
+			// that no layout can remove.
+			total.writeThroughMisses++;
+			return;
+		}
+
+		const bool shadowHit = cache.shadow.access(lineAddr);
+		const bool firstEver = cache.everSeen.insert(lineAddr).second;
+		const MissKind kind = shadowHit ? MissKind::Conflict
+				: firstEver ? MissKind::Compulsory
+				: cache.invalidatedLines.erase(lineAddr) != 0 ? MissKind::Invalidated
+				: MissKind::Capacity;
+
+		recordMiss(Stream::Data, pc, lineAddr, line.valid ? line.lineAddr : INVALID_LINE,
+				index, write, kind);
+		total.missCycles[(int)Stream::Data] += fillCycles(cache, lineAddr);
+
+		if (line.valid && line.dirty)
+		{
+			total.writebacks++;
+			total.writebackCycles += penaltyCfg.writebackCycles;
+		}
+
+		line.valid = true;
+		line.dirty = write && copyBack;
+		line.tag = tag;
+		line.lineAddr = lineAddr;
+	}
+
+	void countDataAccess() { total.dataAccesses++; }
+
+	// Operand cache index. The same decode flycast's own cache implements, kept
+	// identical on purpose: RAM mode steals the half of the cache selected by
+	// index bit 7, and area 3 is forced into it.
+	static u32 dataIndex(u32 vaddr, bool oix, bool ora)
+	{
+		u32 index = oix
+				? ((vaddr >> (25 - 8)) & 0x100) | ((vaddr >> LINE_SHIFT) & (ora ? 0x7f : 0xff))
+				: (vaddr >> LINE_SHIFT) & (ora ? 0x17f : 0x1ff);
+		if (ora && (vaddr >> 29) == 3)
+			index |= 0x80;
+		return index;
+	}
+
+	// True when RAM mode has taken this index out of the cache entirely.
+	static bool dataIndexIsRam(u32 index, bool ora) { return ora && (index & 0x80) != 0; }
 
 	static u32 instIndex(u32 vaddr, bool iix)
 	{

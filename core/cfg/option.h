@@ -502,6 +502,7 @@ extern Option<int> CacheSimSkipFrames;
 extern Option<int> CacheSimFrames;
 extern Option<std::string, false> CacheSimTrace;
 extern Option<std::string, false> CacheSimSymbols;
+extern Option<bool> CacheSimData;
 
 extern Option<bool> OpenGlChecks;
 

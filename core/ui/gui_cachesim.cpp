@@ -69,12 +69,22 @@ void drawCacheSimPanel()
 			frame.misses[inst] == 0 ? 0.0
 					: 100.0 * frame.missKinds[inst][(int)cachesim::MissKind::Conflict]
 							/ frame.misses[inst]);
+	const int data = (int)cachesim::Stream::Data;
+	if (cachesim::dataFeed())
+		ImGui::Text("ocache: %" PRIu64 " misses/frame, %.1f%% conflict",
+				frame.misses[data],
+				frame.misses[data] == 0 ? 0.0
+						: 100.0 * frame.missKinds[data][(int)cachesim::MissKind::Conflict]
+								/ frame.misses[data]);
+	else
+		ImGui::TextDisabled("ocache: not measured");
 	if (!cachesim::symbolsLoaded())
 		ImGui::TextDisabled("no symbols: rows are address ranges");
 
 	ImGui::Separator();
 
-	if (ImGui::BeginTable("##profile", 4,
+	const int columns = cachesim::dataFeed() ? 5 : 4;
+	if (ImGui::BeginTable("##profile", columns,
 			ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit,
 			ImVec2(0.f, ImGui::GetContentRegionAvail().y - uiScaled(30.f))))
 	{
@@ -83,11 +93,13 @@ void drawCacheSimPanel()
 		ImGui::TableSetupColumn("cycles");
 		ImGui::TableSetupColumn("%");
 		ImGui::TableSetupColumn("i$");
+		if (columns == 5)
+			ImGui::TableSetupColumn("d$");
 		ImGui::TableHeadersRow();
 
 		for (const cachesim::ProfileRow& row : rows)
 		{
-			const double total = row.cycles + row.missCycles;
+			const double total = row.cycles + row.missCycles + row.dataMissCycles;
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 			// Generated code and unsymbolised ranges are dimmed: they are a
@@ -110,6 +122,17 @@ void drawCacheSimPanel()
 				ImGui::Text("%.0f%%", 100.0 * row.missCycles / total);
 			else
 				ImGui::TextDisabled("-");
+
+			if (columns == 5)
+			{
+				ImGui::TableNextColumn();
+				// The same for the operand cache: waiting on data rather than
+				// on code, which a different kind of change fixes
+				if (row.dataMissCycles > 0)
+					ImGui::Text("%.0f%%", 100.0 * row.dataMissCycles / total);
+				else
+					ImGui::TextDisabled("-");
+			}
 		}
 		ImGui::EndTable();
 	}

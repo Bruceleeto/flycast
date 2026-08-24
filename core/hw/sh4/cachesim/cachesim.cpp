@@ -23,6 +23,7 @@
 #include "emulator.h"
 #include "hw/mem/addrspace.h"
 #include "hw/sh4/modules/mmu.h"
+#include "hw/sh4/sh4_cache.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/sh4/sh4_mmr.h"
 #include "hw/sh4/sh4_sched.h"
@@ -31,6 +32,9 @@ namespace cachesim
 {
 
 bool g_armed = false;
+// Read at block compile time, so it must not change without the code cache
+// being thrown away with it.
+bool g_dataFeed = false;
 static std::string reportPath;
 
 struct State
@@ -67,6 +71,19 @@ struct State
 	// than flickering with whatever one frame happened to do
 	std::vector<double> execPerFrame;
 	std::vector<double> missPerFrame;
+	// Operand cache misses, attributed the same way as instruction misses: to
+	// the block that was running when they happened.
+	std::vector<u64> dataMissCount;
+	std::vector<u64> dataMissAtFrame;
+	std::vector<double> dataMissPerFrame;
+	// The block currently executing, so a data access can be charged to it. The
+	// dynarec calls traceBlock on entry, and a block runs to completion.
+	u32 currentBlock = 0xffffffff;
+	u32 currentPc = 0;
+	// Accesses whose address could not be translated. Reported rather than
+	// silently dropped: a feed that quietly loses accesses reads as a guest
+	// that makes fewer of them.
+	u64 dataTranslationFailures = 0;
 	double smoothedFrameCycles = 0;
 
 	u32 lookahead = 0;
@@ -160,14 +177,103 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.missAtFrame.resize(size, 0);
 		st.execPerFrame.resize(size, 0.0);
 		st.missPerFrame.resize(size, 0.0);
+		st.dataMissCount.resize(size, 0);
+		st.dataMissAtFrame.resize(size, 0);
+		st.dataMissPerFrame.resize(size, 0.0);
 	}
 	st.execCount[bt->id]++;
+	st.currentBlock = bt->id;
+	st.currentPc = bt->vaddr;
 
 	// Misses are attributed to the block that was fetching when they happened,
 	// which is what makes them addable to a per-function cost
 	const u64 before = st.model.counters().misses[(int)Stream::Inst];
 	fetchRange(bt->vaddr, bt->paddr, bt->size, bt->vaddr, st.lookahead);
 	st.missCount[bt->id] += st.model.counters().misses[(int)Stream::Inst] - before;
+}
+
+//
+// Operand cache feed.
+//
+// One call per guest load or store, from the block the dynarec compiled while
+// armed. Everything the hardware decides before the cache is consulted -
+// whether the access is cacheable, whether the line is written back or written
+// through - depends on the MMU page as well as CCR, so it is decoded here and
+// the model is handed the answer. The decode is the one flycast's own operand
+// cache implements in sh4_cache.h, deliberately: two decodes of the same
+// hardware that disagree would be a bug nobody would see.
+//
+void DYNACALL dataAccess(u32 vaddr, u32 packed)
+{
+	State& st = state();
+	Model& model = st.model;
+	const u32 size = packed & 0xff;
+	const bool write = (packed & 0x100) != 0;
+
+	model.countDataAccess();
+
+	const u32 area = vaddr >> 29;
+	bool cached = CCN_CCR.OCE && cachedArea(area);
+	// P1 uses CCR.CB, everything else the inverse of CCR.WT
+	bool copyBack = area == 4 ? (bool)CCN_CCR.CB : !CCN_CCR.WT;
+
+	u32 paddr = vaddr;
+	const bool translate = mmu_enabled() && translatedArea(area)
+			&& (vaddr & 0xFC000000) != 0x7C000000;
+	if (translate)
+	{
+		const TLB_Entry *entry;
+		if (mmu_full_lookup(vaddr, &entry, paddr) != MmuError::NONE)
+		{
+			st.dataTranslationFailures++;
+			return;
+		}
+		cached = cached && entry->Data.C;
+		copyBack = copyBack && entry->Data.WT == 0;
+	}
+	if (!cached)
+	{
+		model.countUncached(Stream::Data, 1);
+		return;
+	}
+
+	const bool oix = CCN_CCR.OIX;
+	const bool ora = CCN_CCR.ORA;
+	const u64 before = model.counters().misses[(int)Stream::Data];
+
+	// An access can straddle a line, and under an MMU the second line can live
+	// on a different page, so it is translated rather than extrapolated.
+	const u32 lastVline = (vaddr + (size == 0 ? 1 : size) - 1) & ~(LINE_BYTES - 1);
+	u32 vline = vaddr & ~(LINE_BYTES - 1);
+	u32 pline = (paddr & 0x1fffffff) & ~(LINE_BYTES - 1);
+	for (;;)
+	{
+		const u32 index = Model::dataIndex(vline, oix, ora);
+		// RAM mode takes half the cache out of service; those accesses are not
+		// cache accesses at all
+		if (!Model::dataIndexIsRam(index, ora))
+			model.touchData(index, pline, st.currentPc, write, copyBack);
+		if (vline == lastVline)
+			break;
+		vline += LINE_BYTES;
+		if (!translate || (vline & 0xfff) != 0)
+			pline += LINE_BYTES;
+		else
+		{
+			const TLB_Entry *entry;
+			u32 translated;
+			if (mmu_full_lookup(vline, &entry, translated) != MmuError::NONE)
+			{
+				st.dataTranslationFailures++;
+				break;
+			}
+			pline = (translated & 0x1fffffff) & ~(LINE_BYTES - 1);
+		}
+	}
+
+	if (st.currentBlock < st.dataMissCount.size())
+		st.dataMissCount[st.currentBlock] +=
+				model.counters().misses[(int)Stream::Data] - before;
 }
 
 void traceFetch(u32 vaddr, u32 paddr, u32 bytes)
@@ -223,10 +329,13 @@ void frameBoundary()
 	{
 		const double execs = (double)(st.execCount[i] - st.execAtFrame[i]);
 		const double misses = (double)(st.missCount[i] - st.missAtFrame[i]);
+		const double dmisses = (double)(st.dataMissCount[i] - st.dataMissAtFrame[i]);
 		st.execAtFrame[i] = st.execCount[i];
 		st.missAtFrame[i] = st.missCount[i];
+		st.dataMissAtFrame[i] = st.dataMissCount[i];
 		st.execPerFrame[i] += alpha * (execs - st.execPerFrame[i]);
 		st.missPerFrame[i] += alpha * (misses - st.missPerFrame[i]);
+		st.dataMissPerFrame[i] += alpha * (dmisses - st.dataMissPerFrame[i]);
 	}
 	st.smoothedFrameCycles += alpha * ((double)st.frameCycles - st.smoothedFrameCycles);
 
@@ -240,7 +349,13 @@ void frameBoundary()
 			traceOpen(config::CacheSimTrace);
 	}
 
-	if (st.measureFrames != 0 && !st.done && st.frames >= st.measureFrames)
+	// The measurement window only starts once the warm-up has been skipped.
+	// Without this, a smaller -cachesim-frames than -cachesim-skip silently
+	// measures the boot instead of the game and reports it as a result: the
+	// miss rate during loading is an order of magnitude away from steady state,
+	// so the number looks plausible and is answering a different question.
+	if (st.measureFrames != 0 && !st.done && (st.skipFrames == 0 || st.skipped)
+			&& st.frames >= st.measureFrames)
 	{
 		st.done = true;
 		logSummary();
@@ -253,9 +368,13 @@ void frameBoundary()
 	// Picks up the setting being toggled from the GUI while a game runs. The
 	// hook only exists in blocks compiled while armed, so the code cache has to
 	// go with it.
-	if (config::CacheSim != g_armed)
+	if (config::CacheSim != g_armed || (g_armed && config::CacheSimData != g_dataFeed))
 	{
+		g_dataFeed = config::CacheSimData;
 		setArmed(config::CacheSim);
+		// setArmed does nothing when only the data feed changed, so the reset
+		// has to be unconditional here
+		reset();
 		emu.getSh4Executor()->ResetCache();
 	}
 }
@@ -266,6 +385,7 @@ void frameBoundary()
 void init()
 {
 	reportPath = config::CacheSimReport;
+	g_dataFeed = config::CacheSimData;
 	setBlockLookahead(config::CacheSimLookahead);
 	setSkipFrames(config::CacheSimSkipFrames);
 	setMeasureFrames(config::CacheSimFrames);
@@ -317,6 +437,10 @@ void reset()
 	std::fill(st.missAtFrame.begin(), st.missAtFrame.end(), 0);
 	std::fill(st.execPerFrame.begin(), st.execPerFrame.end(), 0.0);
 	std::fill(st.missPerFrame.begin(), st.missPerFrame.end(), 0.0);
+	std::fill(st.dataMissCount.begin(), st.dataMissCount.end(), 0);
+	std::fill(st.dataMissAtFrame.begin(), st.dataMissAtFrame.end(), 0);
+	std::fill(st.dataMissPerFrame.begin(), st.dataMissPerFrame.end(), 0.0);
+	st.dataTranslationFailures = 0;
 	st.smoothedFrameCycles = 0;
 }
 
@@ -492,6 +616,7 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.calls += st.execPerFrame[i];
 		row.cycles += st.execPerFrame[i] * block.guestCycles;
 		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
+		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerMiss;
 	}
 
 	std::vector<ProfileRow> out;
@@ -499,7 +624,8 @@ std::vector<ProfileRow> profile(size_t limit)
 	for (auto& entry : rows)
 		out.push_back(std::move(entry.second));
 	std::sort(out.begin(), out.end(), [](const ProfileRow& a, const ProfileRow& b) {
-		return a.cycles + a.missCycles > b.cycles + b.missCycles;
+		return a.cycles + a.missCycles + a.dataMissCycles
+				> b.cycles + b.missCycles + b.dataMissCycles;
 	});
 	if (out.size() > limit)
 		out.resize(limit);

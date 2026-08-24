@@ -53,8 +53,11 @@ static void usage(const char *exe)
 	fprintf(stderr, "                               different speeds stay comparable.\n");
 	fprintf(stderr, "-cachesim-skip n               clear the counters after n frames, to drop the\n");
 	fprintf(stderr, "                               startup storm and measure steady state.\n");
-	fprintf(stderr, "-cachesim-lookahead n          bytes fetched past the end of a block (default 16).\n");
+	fprintf(stderr, "-cachesim-lookahead n          bytes fetched past the end of a block (default 0).\n");
 	fprintf(stderr, "                               Calibrated against hardware, see docs/cachesim.\n");
+	fprintf(stderr, "-cachesim-data                 also model the operand cache. Costs a call per\n");
+	fprintf(stderr, "                               guest load and store, so it is off by default.\n");
+	fprintf(stderr, "                               Implies -cachesim.\n");
 	fprintf(stderr, "-help                          display this help\n");
 }
 
@@ -257,6 +260,11 @@ void parseCommandLine(int argc, const char * const argv[])
 		}
 		if (!strcmp(argv[i], "-cachesim") || !strcmp(argv[i], "--cachesim")) {
 			setTransient("config", "Debug.CacheSim", "yes");
+			continue;
+		}
+		if (!strcmp(argv[i], "-cachesim-data") || !strcmp(argv[i], "--cachesim-data")) {
+			setTransient("config", "Debug.CacheSim", "yes");
+			setTransient("config", "Debug.CacheSimData", "yes");
 			continue;
 		}
 		if (optionValue(argc, argv, i, "-cachesim-lookahead", value)) {

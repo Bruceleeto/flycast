@@ -144,6 +144,9 @@ Option<int> CacheSimSkipFrames("Debug.CacheSimSkipFrames", 0);
 Option<int> CacheSimFrames("Debug.CacheSimFrames", 0);
 Option<std::string, false> CacheSimTrace("Debug.CacheSimTrace");
 Option<std::string, false> CacheSimSymbols("Debug.CacheSimSymbols");
+// Off by default: a call per guest load and store is not something to pay for
+// unless the data cache is what is being looked at.
+Option<bool> CacheSimData("Debug.CacheSimData", false);
 
 Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 

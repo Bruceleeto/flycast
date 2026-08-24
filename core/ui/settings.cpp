@@ -108,6 +108,15 @@ static void gui_settings_advanced()
 		OptionCheckbox(T("Simulate SH4 Caches"), config::CacheSim,
 				T("Count guest instruction cache misses and what evicted them. Costs speed."
 				  " Nothing is charged to the emulated timing, so the game runs the same"));
+		ImGui::Indent();
+		{
+			DisabledScope scope(!config::CacheSim.get());
+			OptionCheckbox(T("Include the Operand Cache"), config::CacheSimData,
+					T("Also model the data cache. Every guest load and store is fed to the"
+					  " model, which costs considerably more speed than the instruction"
+					  " cache alone"));
+		}
+		ImGui::Unindent();
         OptionCheckbox(T("Dump Textures"), config::DumpTextures,
         		T("Dump all textures into data/texdump/<game id>"));
 		ImGui::Indent();
