@@ -69,6 +69,33 @@ void logSummary()
 			c.instFetched == 0 ? 0.0 : 100.0 * c.misses[inst] / c.instFetched,
 			cycles == 0 ? 0.0 : 100.0 * c.missCycles[inst] / cycles,
 			penaltyModelName(penaltyConfig().model));
+	// Pipeline model. Deliberately its own line and its own percentage: these
+	// are issue and interlock cycles with no cache cost in them, and the two
+	// numbers are never added together. Validated against a Dreamcast at 0.58
+	// cycles mean absolute error per block - see docs/cachesim/pipesim_notes.md
+	// for what is still wrong with it.
+	const PipeTotals pipe = pipeTotals();
+	if (pipe.cycles != 0)
+	{
+		// Stall counts are events, not cycles - more than one pipeline
+		// sequence can stall in the same cycle - so they are shown as shares
+		// of each other and never subtracted from the cycle total.
+		const double ev = pipe.stalls == 0 ? 1.0 : (double)pipe.stalls;
+		NOTICE_LOG(SH4, "cachesim frame %" PRIu64 " pipeline: %" PRIu64 " cycles"
+				" (%.1f%% of guest cycles) | stall events %" PRIu64
+				": flow-dep %.0f%% resource %.0f%% stage %.0f%% output-dep %.0f%%"
+				" | issue+interlock only, no cache cost%s",
+				frameCount(), pipe.cycles,
+				cycles == 0 ? 0.0 : 100.0 * pipe.cycles / cycles,
+				pipe.stalls,
+				100.0 * pipe.byReason[(int)pipesim::StallReason::FlowDep] / ev,
+				100.0 * pipe.byReason[(int)pipesim::StallReason::ResourceHazard] / ev,
+				100.0 * (pipe.byReason[(int)pipesim::StallReason::StageFull]
+					+ pipe.byReason[(int)pipesim::StallReason::StageLocked]) / ev,
+				100.0 * pipe.byReason[(int)pipesim::StallReason::OutputDep] / ev,
+				pipe.unmodelledBlockExecs != 0 ? " (some blocks not fully modelled)" : "");
+	}
+
 	if (dataFeed())
 	{
 		const int data = (int)Stream::Data;
@@ -84,6 +111,45 @@ void logSummary()
 				windowCycles == 0 ? 0.0 : 100.0 * window.missCycles[data] / windowCycles);
 	}
 	markLogWindow();
+}
+
+// The per-function table. This is the output the whole tool exists to produce:
+// where the frame goes, ranked, and enough of a breakdown per row to say what
+// to do about it.
+void logProfile(size_t limit)
+{
+	const std::vector<ProfileRow> rows = profile(limit);
+	if (rows.empty())
+		return;
+
+	const double frameCycles = profileFrameCycles();
+	NOTICE_LOG(SH4, "cachesim per-function profile, per frame"
+			" (pipeline cycles are issue+interlock, hardware-checked;"
+			" cache columns are derived from miss counts)");
+	NOTICE_LOG(SH4, "  %-34s %9s %7s %8s %8s %8s %8s %9s",
+			"function", "cycles", "%frame", "flow-dep", "resource", "stage",
+			"icache", "calls");
+
+	for (const ProfileRow& r : rows)
+	{
+		const double pipe = r.pipeCycles > 0.0 ? r.pipeCycles : r.cycles;
+		const double total = pipe + r.missCycles + r.dataMissCycles;
+		if (total < 1.0)
+			continue;
+		// Stall columns are events, so they are shown as a share of this row's
+		// own stalls rather than as cycles, which they are not.
+		const double ev = r.pipeFlowDep + r.pipeResource + r.pipeStage;
+		NOTICE_LOG(SH4, "  %-34s %9.0f %6.1f%% %7.0f%% %7.0f%% %7.0f%% %8.0f %9.1f%s",
+				r.name.c_str(), total,
+				frameCycles == 0.0 ? 0.0 : 100.0 * total / frameCycles,
+				ev == 0.0 ? 0.0 : 100.0 * r.pipeFlowDep / ev,
+				ev == 0.0 ? 0.0 : 100.0 * r.pipeResource / ev,
+				ev == 0.0 ? 0.0 : 100.0 * r.pipeStage / ev,
+				r.missCycles, r.calls,
+				r.pipeComplete ? "" : " *");
+	}
+	NOTICE_LOG(SH4, "  (* = a block in this row had an opcode with no pipeline"
+			" data and was charged its issue rate with no stalls)");
 }
 
 bool writeReport(const std::string& path)
@@ -238,9 +304,13 @@ bool writeReport(const std::string& path)
 		const ProfileRow& r = rows[i];
 		fprintf(f, "      {\"name\": \"%s\", \"named\": %s, \"start\": \"0x%08x\","
 				" \"cycles\": %.0f, \"icache_cycles\": %.0f, \"ocache_cycles\": %.0f,"
-				" \"calls\": %.1f}%s\n",
+				" \"calls\": %.1f, \"pipe_cycles\": %.0f, \"pipe_flow_dep\": %.0f,"
+				" \"pipe_resource\": %.0f, \"pipe_stage\": %.0f,"
+				" \"pipe_complete\": %s}%s\n",
 				r.name.c_str(), r.named ? "true" : "false", r.start,
 				r.cycles, r.missCycles, r.dataMissCycles, r.calls,
+				r.pipeCycles, r.pipeFlowDep, r.pipeResource, r.pipeStage,
+				r.pipeComplete ? "true" : "false",
 				i + 1 == rows.size() ? "" : ",");
 	}
 	fprintf(f, "    ]\n  },\n");

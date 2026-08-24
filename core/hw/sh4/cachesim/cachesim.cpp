@@ -49,6 +49,13 @@ struct State
 	// the report is written: by then the game has been unloaded and the
 	// scheduler clock is back to zero.
 	u64 totalCycles = 0;
+	// Pipeline model totals for the measurement window. Kept apart from the
+	// cache counters on purpose: these are issue and interlock cycles and
+	// contain no cache cost, and the two are not added together anywhere.
+	u64 pipeCyclesTotal = 0;
+	u64 pipeStallsTotal = 0;
+	u64 pipeByReason[(int)pipesim::StallReason::Count] = {};
+	u64 pipeUnmodelledBlocks = 0;
 	u64 lastSchedCycles = 0;
 	u64 frameCycles = 0;
 
@@ -206,6 +213,14 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.dataMissPerFrame.resize(size, 0.0);
 	}
 	st.execCount[bt->id]++;
+	// Pipeline cycles are a property of the block, so this is a multiply, not
+	// a measurement: no per-instruction work on the hot path.
+	st.pipeCyclesTotal += bt->pipeCycles;
+	st.pipeStallsTotal += bt->pipeStalls;
+	for (int i = 0; i < (int)pipesim::StallReason::Count; i++)
+		st.pipeByReason[i] += bt->pipeByReason[i];
+	if (!bt->pipeModelled)
+		st.pipeUnmodelledBlocks++;
 	st.currentBlock = bt->id;
 	st.currentPc = bt->vaddr;
 
@@ -390,6 +405,7 @@ void frameBoundary()
 	{
 		st.done = true;
 		logSummary();
+		logProfile();
 		if (!reportPath.empty())
 			writeReport(reportPath);
 		traceClose();
@@ -471,6 +487,10 @@ void reset()
 	st.model.reset();
 	st.frames = 0;
 	st.totalCycles = 0;
+	st.pipeCyclesTotal = 0;
+	st.pipeStallsTotal = 0;
+	memset(st.pipeByReason, 0, sizeof(st.pipeByReason));
+	st.pipeUnmodelledBlocks = 0;
 	// The scheduler clock does not restart with us. Zeroing this instead of
 	// sampling it makes the next frame boundary charge everything that happened
 	// before the reset to a single frame, which silently inflates the guest
@@ -518,23 +538,65 @@ void setReportPath(const std::string& path) { reportPath = path; }
 //
 // Block pool
 //
-static u64 hashGuestCode(u32 paddr, u32 size)
+// Read a block's guest instructions out into a buffer. Both the hash and the
+// pipeline analysis need the same bytes, and reading them twice through
+// addrspace on an unmapped block is not free.
+static void readGuestCode(u32 paddr, u32 size, std::vector<u8>& out)
 {
+	out.resize(size);
 	const u8 *mem = GetMemPtr(paddr, size);
 	if (mem != nullptr)
-		return hashCode(mem, size);
-	// Not directly mapped: copy it out so the hash is computed over the same
-	// bytes, by the same function, as anything checking a binary against it
-	std::vector<u8> bytes(size);
-	for (u32 i = 0; i < size; i++)
-		bytes[i] = (u8)addrspace::read8(paddr + i);
-	return hashCode(bytes.data(), size);
+		memcpy(out.data(), mem, size);
+	else
+		for (u32 i = 0; i < size; i++)
+			out[i] = (u8)addrspace::read8(paddr + i);
 }
+
+// Run the pipeline model over a block's instructions, once, at compile time.
+static void analyzeBlockPipeline(const std::vector<u8>& code, BlockTrace& bt)
+{
+	const u32 count = (u32)(code.size() / 2);
+	bt.pipeCycles = 0;
+	bt.pipeStalls = 0;
+	memset(bt.pipeByReason, 0, sizeof(bt.pipeByReason));
+	bt.pipeModelled = false;
+	if (count == 0)
+		return;
+
+	std::vector<u16> ops(count);
+	for (u32 i = 0; i < count; i++)
+		ops[i] = (u16)(code[i * 2] | (code[i * 2 + 1] << 8));
+
+	// The block is measured back to back with itself rather than in isolation,
+	// so what comes out is the steady-state cost of running it again - the same
+	// quantity the hardware test measures, and the one that multiplies by an
+	// execution count. Analysing it once instead would include the cycles it
+	// takes to fill an empty pipeline, which a loop pays once and not per
+	// iteration.
+	std::vector<u16> once = ops;
+	std::vector<u16> twice = ops;
+	twice.insert(twice.end(), ops.begin(), ops.end());
+
+	pipesim::Result a = pipesim::analyze(once.data(), (u32)once.size());
+	pipesim::Result b = pipesim::analyze(twice.data(), (u32)twice.size());
+	if (a.stuck || b.stuck || b.cycles < a.cycles)
+		return;
+
+	bt.pipeCycles = b.cycles - a.cycles;
+	bt.pipeStalls = b.stallCycles > a.stallCycles ? b.stallCycles - a.stallCycles : 0;
+	for (int i = 0; i < (int)pipesim::StallReason::Count; i++)
+		bt.pipeByReason[i] = (u16)std::min<u32>(0xffff,
+				b.byReason[i] > a.byReason[i] ? b.byReason[i] - a.byReason[i] : 0);
+	bt.pipeModelled = pipesim::fullyModelled(ops.data(), count);
+}
+
 
 const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles)
 {
 	State& st = state();
-	const u64 hash = hashGuestCode(paddr, size);
+	std::vector<u8> code;
+	readGuestCode(paddr, size, code);
+	const u64 hash = hashCode(code.data(), size);
 	const u64 key = hash ^ ((u64)paddr << 24) ^ size;
 
 	auto [it, inserted] = st.blockLookup.insert({ key, (u32)st.blockPool.size() });
@@ -549,11 +611,25 @@ const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles)
 	}
 	// std::deque so that the raw pointers baked into compiled code stay valid
 	// as the pool grows
-	st.blockPool.push_back({ vaddr, paddr, size, (u32)st.blockPool.size(), guestCycles, hash });
+	st.blockPool.push_back({ vaddr, paddr, size, (u32)st.blockPool.size(), guestCycles,
+			0, 0, {}, false, hash });
+	analyzeBlockPipeline(code, st.blockPool.back());
 	return &st.blockPool.back();
 }
 
 const std::deque<BlockTrace>& blocks() { return state().blockPool; }
+
+PipeTotals pipeTotals()
+{
+	State& st = state();
+	PipeTotals t{};
+	t.cycles = st.pipeCyclesTotal;
+	t.stalls = st.pipeStallsTotal;
+	for (int i = 0; i < (int)pipesim::StallReason::Count; i++)
+		t.byReason[i] = st.pipeByReason[i];
+	t.unmodelledBlockExecs = st.pipeUnmodelledBlocks;
+	return t;
+}
 
 //
 // Results
@@ -664,6 +740,7 @@ std::vector<ProfileRow> profile(size_t limit)
 			row.named = symbol != nullptr;
 			row.start = block.vaddr;
 			row.end = block.vaddr + block.size;
+			row.pipeComplete = true;
 		}
 		row.start = std::min(row.start, block.vaddr);
 		row.end = std::max(row.end, block.vaddr + block.size);
@@ -671,15 +748,33 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.cycles += st.execPerFrame[i] * block.guestCycles;
 		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
 		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerMiss;
+
+		// Pipeline cycles are per execution and already steady-state, so this
+		// is the same multiply the run totals use.
+		const double execs = st.execPerFrame[i];
+		row.pipeCycles += execs * block.pipeCycles;
+		row.pipeFlowDep += execs * block.pipeByReason[(int)pipesim::StallReason::FlowDep];
+		row.pipeResource += execs * block.pipeByReason[(int)pipesim::StallReason::ResourceHazard];
+		row.pipeStage += execs * (block.pipeByReason[(int)pipesim::StallReason::StageFull]
+				+ block.pipeByReason[(int)pipesim::StallReason::StageLocked]);
+		if (!block.pipeModelled)
+			row.pipeComplete = false;
 	}
 
 	std::vector<ProfileRow> out;
 	out.reserve(rows.size());
 	for (auto& entry : rows)
 		out.push_back(std::move(entry.second));
+	// Rank by the pipeline model where it produced anything, since that is the
+	// figure with hardware behind it, and fall back to flycast's own estimate
+	// otherwise. Cache cycles are added in both cases: a row can be cheap to
+	// issue and expensive to fetch.
 	std::sort(out.begin(), out.end(), [](const ProfileRow& a, const ProfileRow& b) {
-		return a.cycles + a.missCycles + a.dataMissCycles
-				> b.cycles + b.missCycles + b.dataMissCycles;
+		const double ta = (a.pipeCycles > 0.0 ? a.pipeCycles : a.cycles)
+				+ a.missCycles + a.dataMissCycles;
+		const double tb = (b.pipeCycles > 0.0 ? b.pipeCycles : b.cycles)
+				+ b.missCycles + b.dataMissCycles;
+		return ta > tb;
 	});
 	if (out.size() > limit)
 		out.resize(limit);

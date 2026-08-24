@@ -31,6 +31,7 @@
 #pragma once
 #include "types.h"
 #include "cachesim_model.h"
+#include "pipesim.h"
 
 #include <deque>
 #include <string>
@@ -48,6 +49,21 @@ struct BlockTrace
 	u32 size;	// guest bytes covered by the block
 	u32 id;		// dense index, used as the trace stream symbol
 	u32 guestCycles;	// flycast's issue-cycle estimate for one execution
+	// Pipeline model, computed once here rather than measured at runtime: a
+	// block is a straight-line instruction sequence, so its issue schedule is
+	// a property of the block. See core/hw/sh4/cachesim/pipesim.h.
+	//
+	// These are cycles the SH4 spends issuing and interlocking. They do NOT
+	// include cache misses, which the model above counts separately and which
+	// are reported in their own column - two uncertain models added together
+	// give a number nobody can check.
+	u32 pipeCycles;		// total, one execution, steady state
+	// Stall EVENTS, not cycles: several pipeline sequences can stall in the
+	// same cycle, so this can exceed pipeCycles and must never be subtracted
+	// from it. It is a breakdown of why, not an amount of time.
+	u32 pipeStalls;
+	u16 pipeByReason[(int)pipesim::StallReason::Count];
+	bool pipeModelled;	// false if any opcode had no pipeline data
 	u64 hash;	// hash of the guest instruction bytes: identity for JIT-resident
 			// code, whose address is not stable across runs
 };
@@ -146,6 +162,19 @@ u64 frameCount();
 // a running average.
 Counters logWindow();
 u64 logWindowCycles();
+
+// Pipeline model totals for the run so far. Issue and interlock cycles only:
+// no cache cost is included, and the two are reported side by side rather than
+// summed, because adding two separately-uncertain models produces a number
+// that cannot be checked against anything.
+struct PipeTotals
+{
+	u64 cycles;
+	u64 stalls;
+	u64 byReason[(int)pipesim::StallReason::Count];
+	u64 unmodelledBlockExecs;
+};
+PipeTotals pipeTotals();
 void markLogWindow();
 
 double derivedMissCycles(Stream stream);
@@ -172,6 +201,22 @@ struct ProfileRow
 	double dataMissCycles;	// of which, operand cache fill. Zero unless the data
 			// feed is on, which costs speed and so is opt-in
 	double calls;		// block entries per frame
+
+	// Pipeline model, per frame. Unlike `cycles` above - which is flycast's
+	// own issue estimate and is good for ranking only - these come from the
+	// SH4 pipeline model and have been checked against hardware: 0.8% on
+	// instruction count and 18% low on cycles for a real FP workload, the
+	// shortfall being cache and store queue, which are not in here.
+	//
+	// The three stall columns are what make a row actionable. High issue means
+	// the code does too much work and scheduling will not help. High flow-dep
+	// means reorder it. High icache/dcache means move it.
+	double pipeCycles;		// issue + interlock, no cache cost
+	double pipeFlowDep;		// waiting on a previous result
+	double pipeResource;	// non-parallel-executable groups colliding
+	double pipeStage;		// a stage busy or locked
+	bool pipeComplete;		// false if any block had an unmodelled opcode
+
 	bool named;
 };
 
@@ -190,6 +235,8 @@ double profileAccountedCycles();
 // Reporting (cachesim_report.cpp)
 //
 void logSummary();
+// Per-function table: where the frame goes, ranked, with a stall breakdown.
+void logProfile(size_t limit = 24);
 bool writeReport(const std::string& path);
 void setReportPath(const std::string& path);
 
