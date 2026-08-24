@@ -30,6 +30,7 @@
 #include "cachesim_model.h"
 #include "cachesim_trace.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -82,8 +83,20 @@ struct Options
 	int64_t from = 0, to = 0, step = 0;
 	size_t topN = 10;
 
+	// Moves already decided on, applied before `shift`. The reorder search
+	// accumulates into this: each unit it places stays placed while the next
+	// one is searched.
+	std::vector<Shift> fixed;
+
+	// Symbol names for the report. Decoration only - every search works on
+	// addresses, because generated code has no symbols and never will.
+	std::string symbolPath;
+
 	// Discovery: find the regions worth moving instead of being told them
 	bool automatic = false;
+	bool reorder = false;
+	size_t reorderUnits = 4;	// functions to place
+	int64_t reorderStep = 512;	// alignment granularity searched per function
 	size_t regions = 4;		// candidate regions to try
 	u32 clusterGap = 64 << 10;	// lines further apart than this start a new region
 	int64_t autoStep = 1024;	// shift granularity when sweeping a candidate
@@ -204,10 +217,22 @@ private:
 	{
 		u32 vaddr = b.vaddr;
 		u32 paddr = b.paddr;
-		if (opt.shift.end != 0 && opt.shift.covers(paddr))
+		int64_t delta = 0;
+		// First match wins. Moves never overlap: a placed unit is given an
+		// address range of its own, so the order here cannot change a result,
+		// only the cost of finding one.
+		for (const Shift& m : opt.fixed)
+			if (m.end != 0 && m.covers(paddr))
+			{
+				delta = m.delta;
+				break;
+			}
+		if (delta == 0 && opt.shift.end != 0 && opt.shift.covers(paddr))
+			delta = opt.shift.delta;
+		if (delta != 0)
 		{
-			vaddr = (u32)((int64_t)vaddr + opt.shift.delta);
-			paddr = (u32)((int64_t)paddr + opt.shift.delta);
+			vaddr = (u32)((int64_t)vaddr + delta);
+			paddr = (u32)((int64_t)paddr + delta);
 		}
 
 		model.countBlockFetch(paddr, b.size, opt.lookahead);
@@ -259,6 +284,130 @@ private:
 	u32 lineBytes = 0;
 	u64 lastCycle = 0;
 };
+
+// ---------------------------------------------------------------------------
+// Symbols
+//
+// Read straight out of the ELF here rather than reusing flycast's symbol layer,
+// which is tied to the emulator. Names are decoration: every search below works
+// on addresses, because a retail disc and a JIT buffer have no symbols at all.
+// ---------------------------------------------------------------------------
+
+struct Sym
+{
+	u32 start;
+	u32 size;
+	std::string name;
+};
+
+std::vector<Sym> g_syms;	// sorted by start, non-overlapping enough to bisect
+
+struct ElfReader
+{
+	const std::vector<u8>& b;
+	bool le;
+
+	uint16_t u16At(size_t o) const
+	{
+		if (o + 2 > b.size())
+			return 0;
+		return le ? (uint16_t)(b[o] | (b[o + 1] << 8)) : (uint16_t)((b[o] << 8) | b[o + 1]);
+	}
+	u32 u32At(size_t o) const
+	{
+		if (o + 4 > b.size())
+			return 0;
+		return le ? (u32)(b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | ((u32)b[o + 3] << 24))
+				  : (u32)((u32)(b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]);
+	}
+};
+
+bool loadElfSymbols(const std::string& path)
+{
+	FILE *f = std::fopen(path.c_str(), "rb");
+	if (f == nullptr)
+	{
+		std::fprintf(stderr, "cannot open %s\n", path.c_str());
+		return false;
+	}
+	std::fseek(f, 0, SEEK_END);
+	const long size = std::ftell(f);
+	std::fseek(f, 0, SEEK_SET);
+	std::vector<u8> b((size_t)std::max(size, 0L));
+	b.resize(std::fread(b.data(), 1, b.size(), f));
+	std::fclose(f);
+
+	if (b.size() < 52 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F')
+	{
+		std::fprintf(stderr, "%s is not an ELF\n", path.c_str());
+		return false;
+	}
+	if (b[4] != 1)
+	{
+		std::fprintf(stderr, "%s is not 32 bit; SH4 images are\n", path.c_str());
+		return false;
+	}
+	const ElfReader r{ b, b[5] != 2 };
+
+	const u32 shoff = r.u32At(0x20);
+	const uint16_t shentsize = r.u16At(0x2e);
+	const uint16_t shnum = r.u16At(0x30);
+	if (shoff == 0 || shentsize < 40 || shnum == 0)
+	{
+		std::fprintf(stderr, "%s has no section table, so no symbols\n", path.c_str());
+		return false;
+	}
+
+	for (uint16_t i = 0; i < shnum; i++)
+	{
+		const size_t sh = shoff + (size_t)i * shentsize;
+		if (r.u32At(sh + 4) != 2)		// SHT_SYMTAB
+			continue;
+		const u32 off = r.u32At(sh + 16);
+		const u32 len = r.u32At(sh + 20);
+		const u32 link = r.u32At(sh + 24);
+		const u32 entsize = r.u32At(sh + 36);
+		if (entsize < 16 || link >= shnum)
+			continue;
+		const size_t strsh = shoff + (size_t)link * shentsize;
+		const u32 stroff = r.u32At(strsh + 16);
+		const u32 strlen_ = r.u32At(strsh + 20);
+
+		for (u32 o = 0; o + entsize <= len; o += entsize)
+		{
+			const size_t e = off + o;
+			const u32 nameOff = r.u32At(e);
+			const u32 value = r.u32At(e + 4);
+			const u32 symSize = r.u32At(e + 8);
+			const u8 info = e + 12 < b.size() ? b[e + 12] : 0;
+			if ((info & 0xf) != 2 || symSize == 0)	// STT_FUNC with a body
+				continue;
+			if (nameOff >= strlen_)
+				continue;
+			const char *name = (const char *)b.data() + stroff + nameOff;
+			const size_t maxLen = b.size() - (stroff + nameOff);
+			g_syms.push_back({ value, symSize, std::string(name, strnlen(name, maxLen)) });
+		}
+	}
+	std::sort(g_syms.begin(), g_syms.end(),
+			[](const Sym& a, const Sym& c) { return a.start < c.start; });
+	std::printf("%zu function symbols from %s\n", g_syms.size(), path.c_str());
+	return !g_syms.empty();
+}
+
+// Region bits only: a trace records addresses as the guest used them, so the
+// same RAM appears through P1 while an ELF names it physically.
+const Sym *symbolFor(u32 addr)
+{
+	const u32 a = Shift::normalise(addr);
+	auto it = std::upper_bound(g_syms.begin(), g_syms.end(), a,
+			[](u32 v, const Sym& s) { return v < Shift::normalise(s.start); });
+	if (it == g_syms.begin())
+		return nullptr;
+	--it;
+	const u32 start = Shift::normalise(it->start);
+	return a < start + it->size ? &*it : nullptr;
+}
 
 struct Result
 {
@@ -320,8 +469,18 @@ void reportDetail(Trace& trace, const Options& opt)
 	{
 		std::printf("  set %3u  %10" PRIu64 " misses\n", set, cache.stats[set].misses);
 		for (const EvictPair& e : model.setEvictors(Stream::Inst, set))
-			std::printf("      %08x evicted %08x  x%" PRIu64 "\n",
-					e.line, e.evictedLine, e.count);
+		{
+			// The pair is the useful part: what keeps throwing what out. Names
+			// turn that into two functions somebody can move.
+			const Sym *line = symbolFor(e.line);
+			const Sym *evicted = symbolFor(e.evictedLine);
+			std::printf("      %08x evicted %08x  x%" PRIu64 "%s%s%s%s\n",
+					e.line, e.evictedLine, e.count,
+					line != nullptr ? "   " : "",
+					line != nullptr ? line->name.c_str() : "",
+					evicted != nullptr ? " over " : "",
+					evicted != nullptr ? evicted->name.c_str() : "");
+		}
 	}
 }
 
@@ -361,6 +520,218 @@ std::vector<Region> discoverRegions(Model& model, const Options& opt)
 	return regions;
 }
 
+// ---------------------------------------------------------------------------
+// Reorder
+//
+// Padding shifts everything above it, which is a blunt knob: it changes every
+// distance at once. Moving one function changes only that function's set
+// mapping, which is what a linker script or a section attribute actually does.
+//
+// A unit is relocated into an arena above every address the trace ever touched,
+// so no two units can collide and the search never has to reason about holes.
+// Only the low bits of the destination matter - the index is the address modulo
+// the cache size - so what the search reports is an alignment, not a place.
+// ---------------------------------------------------------------------------
+
+struct Unit
+{
+	u32 start;
+	u32 end;
+	u64 conflict;
+	std::string name;
+};
+
+std::vector<Unit> discoverUnits(Model& model, const Options& opt)
+{
+	std::vector<SiteStat> sites = model.topSites(Stream::Inst, 8192);
+	std::vector<Unit> units;
+
+	if (!g_syms.empty())
+	{
+		// Group conflict misses by the function they landed in. Lines with no
+		// symbol - generated code, mostly - fall through to the clustering
+		// below so that a JIT buffer is still a candidate.
+		std::vector<u64> perSym(g_syms.size(), 0);
+		std::vector<SiteStat> unnamed;
+		for (const SiteStat& s : sites)
+		{
+			const u64 c = s.kinds[(int)MissKind::Conflict];
+			if (c == 0)
+				continue;
+			const Sym *sym = symbolFor(s.line);
+			if (sym != nullptr)
+				perSym[sym - &g_syms[0]] += c;
+			else
+				unnamed.push_back(s);
+		}
+		for (size_t i = 0; i < g_syms.size(); i++)
+			if (perSym[i] != 0)
+				units.push_back({ Shift::normalise(g_syms[i].start),
+						Shift::normalise(g_syms[i].start) + g_syms[i].size,
+						perSym[i], g_syms[i].name });
+
+		std::sort(unnamed.begin(), unnamed.end(),
+				[](const SiteStat& a, const SiteStat& b) { return a.line < b.line; });
+		for (const SiteStat& s : unnamed)
+		{
+			const u32 line = Shift::normalise(s.line);
+			if (!units.empty() && units.back().name.empty()
+					&& line - units.back().end < opt.clusterGap)
+			{
+				units.back().end = line + LINE_BYTES;
+				units.back().conflict += s.kinds[(int)MissKind::Conflict];
+				continue;
+			}
+			units.push_back({ line, line + LINE_BYTES, s.kinds[(int)MissKind::Conflict], "" });
+		}
+	}
+	else
+	{
+		for (const Region& r : discoverRegions(model, opt))
+			units.push_back({ Shift::normalise(r.start), Shift::normalise(r.end), r.conflict, "" });
+	}
+
+	std::sort(units.begin(), units.end(),
+			[](const Unit& a, const Unit& b) { return a.conflict > b.conflict; });
+	return units;
+}
+
+std::string unitLabel(const Unit& u)
+{
+	if (!u.name.empty())
+		return u.name;
+	char buf[32];
+	std::snprintf(buf, sizeof(buf), "%08x-%08x", u.start, u.end);
+	return buf;
+}
+
+int runReorder(Trace& trace, Options opt)
+{
+	const int64_t span = (int64_t)IC_SETS * LINE_BYTES;
+	if (opt.reorderStep <= 0 || (span % opt.reorderStep) != 0)
+	{
+		std::fprintf(stderr, "--reorder-step must divide the cache size (%" PRId64 ")\n", span);
+		return 1;
+	}
+
+	Options base = opt;
+	base.shift = Shift{};
+	base.fixed.clear();
+	Model probe;
+	probe.setMissRingSize(0);
+	trace.replay(probe, base);
+	const u64 baseMisses = probe.counters().misses[(int)Stream::Inst];
+	const u64 baseConflict = probe.counters().missKinds[(int)Stream::Inst][(int)MissKind::Conflict];
+	std::printf("baseline: %" PRIu64 " misses, %" PRIu64 " conflict (%.1f%%)\n\n",
+			baseMisses, baseConflict,
+			baseMisses == 0 ? 0.0 : 100.0 * baseConflict / baseMisses);
+
+	std::vector<Unit> units = discoverUnits(probe, opt);
+	if (units.size() > opt.reorderUnits)
+		units.resize(opt.reorderUnits);
+	if (units.empty())
+	{
+		std::printf("no conflict misses to work with\n");
+		return 0;
+	}
+	std::printf("units to place, by conflict misses:\n");
+	for (const Unit& u : units)
+		std::printf("  %-32s %08x-%08x %10" PRIu64 " (%.1f%% of conflict)\n",
+				unitLabel(u).c_str(), u.start, u.end, u.conflict,
+				baseConflict == 0 ? 0.0 : 100.0 * u.conflict / baseConflict);
+	std::printf("\n");
+
+	// Above everything the trace touched, so a relocated unit can never land on
+	// live code. Rounded to the cache size so a slot offset is an alignment.
+	u32 highest = 0;
+	for (const Block& b : trace.blockTable())
+		highest = std::max(highest, Shift::normalise(b.paddr) + b.size);
+	u64 arena = ((u64)highest + span - 1) / span * span + span;
+
+	u64 bestTotal = baseMisses;
+	for (size_t i = 0; i < units.size(); i++)
+	{
+		const Unit& u = units[i];
+		const u32 size = u.end - u.start;
+		const u64 slot = arena;
+		arena += ((size + span - 1) / span) * span + span;
+
+		std::printf("%s  (at %08x, alignment %04x; %% is against the running total"
+				" %" PRIu64 ", not the baseline)\n",
+				unitLabel(u).c_str(), u.start, (u32)(u.start & (span - 1)), bestTotal);
+
+		int64_t bestDelta = 0;
+		u64 bestMisses = bestTotal;
+		for (int64_t off = 0; off < span; off += opt.reorderStep)
+		{
+			Options candidate = opt;
+			candidate.shift = Shift{};
+			candidate.fixed.insert(candidate.fixed.begin(),
+					Shift{ u.start, u.end, (int64_t)(slot + off) - (int64_t)u.start });
+			const Result res = run(trace, candidate);
+			std::printf("    alignment %04x  %12" PRIu64 " misses  %12" PRIu64 " conflict  %+7.2f%%\n",
+					(u32)off, res.misses, res.conflict,
+					bestTotal == 0 ? 0.0 : 100.0 * ((double)res.misses - bestTotal) / bestTotal);
+			if (res.misses < bestMisses)
+			{
+				bestMisses = res.misses;
+				bestDelta = (int64_t)(slot + off) - (int64_t)u.start;
+			}
+		}
+		if (bestDelta == 0)
+		{
+			std::printf("    no alignment beat leaving it where it is\n\n");
+			continue;
+		}
+		// Placed. Everything after this is searched with this unit moved, so
+		// the numbers stay a running total rather than a set of separate
+		// what-ifs that cannot be applied together.
+		opt.fixed.insert(opt.fixed.begin(), Shift{ u.start, u.end, bestDelta });
+		std::printf("    placed at alignment %04x  ->  %" PRIu64 " misses (%.2f%% below baseline)\n\n",
+				(u32)((u.start + bestDelta) & (span - 1)), bestMisses,
+				100.0 * ((double)baseMisses - bestMisses) / baseMisses);
+		bestTotal = bestMisses;
+	}
+
+	if (opt.fixed.empty())
+	{
+		std::printf("no placement beat the measured layout\n");
+		return 0;
+	}
+	std::printf("layout: %" PRIu64 " misses, %.2f%% fewer than baseline\n",
+			bestTotal, 100.0 * ((double)baseMisses - bestTotal) / baseMisses);
+	for (const Shift& m : opt.fixed)
+	{
+		const Unit *u = nullptr;
+		for (const Unit& c : units)
+			if (c.start == m.start)
+				u = &c;
+		std::printf("  align %-32s to %04x (mod %04x), was %04x\n",
+				u != nullptr ? unitLabel(*u).c_str() : "?",
+				(u32)((m.start + m.delta) & (span - 1)), (u32)span,
+				(u32)(m.start & (span - 1)));
+	}
+	// The running total came out of a search that added one move at a time.
+	// Replaying the final layout from scratch is one more pass and catches an
+	// accumulation bug that would otherwise be reported as a result.
+	Options verify = opt;
+	verify.shift = Shift{};
+	const Result check = run(trace, verify);
+	if (check.misses != bestTotal)
+	{
+		std::printf("\nthe combined layout replays to %" PRIu64 " misses, not the %" PRIu64
+				" the search reported: do not trust either number\n", check.misses, bestTotal);
+		return 1;
+	}
+	std::printf("combined layout replayed from scratch: %" PRIu64 " misses, as searched\n",
+			check.misses);
+
+	std::printf("\nAlignments are what a linker script or a section attribute controls.\n"
+			"Relocating a unit makes its lines new to the model, so a few hundred\n"
+			"misses move from conflict to compulsory; the total is unaffected.\n");
+	return 0;
+}
+
 void usage(const char *exe)
 {
 	std::fprintf(stderr,
@@ -368,7 +739,12 @@ void usage(const char *exe)
 		"\n"
 		"Replays a cachesim trace under a modified code layout.\n"
 		"\n"
-		"  --auto                    find the regions worth moving and sweep them\n"
+		"  --auto                    find the regions worth moving and pad before them\n"
+		"  --reorder                 place the worst functions at the alignment that\n"
+		"                            costs least, one after another\n"
+		"  --reorder-units n         functions to place (default 4)\n"
+		"  --reorder-step n          alignment granularity searched (default 512)\n"
+		"  --symbols file.elf        name regions and functions from an ELF\n"
 		"  --regions n               candidates to try in --auto (default 4)\n"
 		"  --auto-step n             shift granularity in --auto (default 1024)\n"
 		"  --shift start:end:delta   move guest code in [start,end) by delta bytes\n"
@@ -399,6 +775,11 @@ bool parseSweep(const char *arg, Options& opt)
 
 int main(int argc, char *argv[])
 {
+	// A search prints a line per replay over several minutes; block buffering
+	// would hold all of it back until the run ended, which makes a long sweep
+	// look hung when redirected to a file.
+	setvbuf(stdout, nullptr, _IOLBF, 0);
+
 	Options opt;
 	for (int i = 1; i < argc; i++)
 	{
@@ -415,6 +796,14 @@ int main(int argc, char *argv[])
 			opt.topN = strtoul(argv[++i], nullptr, 0);
 		else if (arg == "--auto")
 			opt.automatic = true;
+		else if (arg == "--reorder")
+			opt.reorder = true;
+		else if (arg == "--reorder-units" && i + 1 < argc)
+			opt.reorderUnits = strtoul(argv[++i], nullptr, 0);
+		else if (arg == "--reorder-step" && i + 1 < argc)
+			opt.reorderStep = strtoll(argv[++i], nullptr, 0);
+		else if (arg == "--symbols" && i + 1 < argc)
+			opt.symbolPath = argv[++i];
 		else if (arg == "--regions" && i + 1 < argc)
 			opt.regions = strtoul(argv[++i], nullptr, 0);
 		else if (arg == "--auto-step" && i + 1 < argc)
@@ -437,9 +826,15 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	if (!opt.symbolPath.empty())
+		loadElfSymbols(opt.symbolPath);
+
 	Trace trace;
 	if (!trace.load(opt.tracePath))
 		return 1;
+
+	if (opt.reorder)
+		return runReorder(trace, opt);
 
 	if (opt.automatic)
 	{
@@ -460,9 +855,14 @@ int main(int argc, char *argv[])
 			regions.resize(opt.regions);
 		std::printf("candidate regions, by conflict misses:\n");
 		for (const Region& r : regions)
-			std::printf("  %08x-%08x  %10" PRIu64 " conflict (%.1f%% of all)\n",
+		{
+			const Sym *sym = symbolFor(r.start);
+			std::printf("  %08x-%08x  %10" PRIu64 " conflict (%.1f%% of all)%s%s\n",
 					r.start, r.end, r.conflict,
-					baseConflict == 0 ? 0.0 : 100.0 * r.conflict / baseConflict);
+					baseConflict == 0 ? 0.0 : 100.0 * r.conflict / baseConflict,
+					sym != nullptr ? "  from " : "",
+					sym != nullptr ? sym->name.c_str() : "");
+		}
 		std::printf("\n");
 
 		// Shifting a region models inserting padding before it, so everything
