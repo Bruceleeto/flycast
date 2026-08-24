@@ -86,6 +86,12 @@ struct State
 	std::vector<u64> dataMissCount;
 	std::vector<u64> dataMissAtFrame;
 	std::vector<double> dataMissPerFrame;
+	// Dirty line evictions, attributed the same way. Separate from the miss
+	// count because they cost half again as much as the fill they ride along
+	// with, and a workload can have plenty of one and none of the other.
+	std::vector<u64> dataWbCount;
+	std::vector<u64> dataWbAtFrame;
+	std::vector<double> dataWbPerFrame;
 	// Store queue flushes, attributed the same way: to the block that was
 	// running when the queue drained.
 	std::vector<u64> sqFlushCount;
@@ -216,6 +222,9 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.dataMissCount.resize(size, 0);
 		st.dataMissAtFrame.resize(size, 0);
 		st.dataMissPerFrame.resize(size, 0.0);
+		st.dataWbCount.resize(size, 0);
+		st.dataWbAtFrame.resize(size, 0);
+		st.dataWbPerFrame.resize(size, 0.0);
 		st.sqFlushCount.resize(size, 0);
 		st.sqFlushAtFrame.resize(size, 0);
 		st.sqFlushPerFrame.resize(size, 0.0);
@@ -301,6 +310,7 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 	const bool oix = CCN_CCR.OIX;
 	const bool ora = CCN_CCR.ORA;
 	const u64 before = model.counters().misses[(int)Stream::Data];
+	const u64 wbBefore = model.counters().writebacks;
 	const double cyclesBefore = model.counters().missCycles[(int)Stream::Data];
 
 	// An access can straddle a line, and under an MMU the second line can live
@@ -334,8 +344,11 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 	}
 
 	if (st.currentBlock < st.dataMissCount.size())
+	{
 		st.dataMissCount[st.currentBlock] +=
 				model.counters().misses[(int)Stream::Data] - before;
+		st.dataWbCount[st.currentBlock] += model.counters().writebacks - wbBefore;
+	}
 	chargeCycles(st, model.counters().missCycles[(int)Stream::Data] - cyclesBefore);
 }
 
@@ -394,14 +407,17 @@ void frameBoundary()
 		const double misses = (double)(st.missCount[i] - st.missAtFrame[i]);
 		const double dmisses = (double)(st.dataMissCount[i] - st.dataMissAtFrame[i]);
 		const double sqf = (double)(st.sqFlushCount[i] - st.sqFlushAtFrame[i]);
+		const double wbs = (double)(st.dataWbCount[i] - st.dataWbAtFrame[i]);
 		st.execAtFrame[i] = st.execCount[i];
 		st.missAtFrame[i] = st.missCount[i];
 		st.dataMissAtFrame[i] = st.dataMissCount[i];
 		st.sqFlushAtFrame[i] = st.sqFlushCount[i];
+		st.dataWbAtFrame[i] = st.dataWbCount[i];
 		st.execPerFrame[i] += alpha * (execs - st.execPerFrame[i]);
 		st.missPerFrame[i] += alpha * (misses - st.missPerFrame[i]);
 		st.dataMissPerFrame[i] += alpha * (dmisses - st.dataMissPerFrame[i]);
 		st.sqFlushPerFrame[i] += alpha * (sqf - st.sqFlushPerFrame[i]);
+		st.dataWbPerFrame[i] += alpha * (wbs - st.dataWbPerFrame[i]);
 	}
 	st.smoothedFrameCycles += alpha * ((double)st.frameCycles - st.smoothedFrameCycles);
 
@@ -535,6 +551,9 @@ void reset()
 	std::fill(st.sqFlushCount.begin(), st.sqFlushCount.end(), 0);
 	std::fill(st.sqFlushAtFrame.begin(), st.sqFlushAtFrame.end(), 0);
 	std::fill(st.sqFlushPerFrame.begin(), st.sqFlushPerFrame.end(), 0.0);
+	std::fill(st.dataWbCount.begin(), st.dataWbCount.end(), 0);
+	std::fill(st.dataWbAtFrame.begin(), st.dataWbAtFrame.end(), 0);
+	std::fill(st.dataWbPerFrame.begin(), st.dataWbPerFrame.end(), 0.0);
 	st.dataTranslationFailures = 0;
 	st.chargeRemainder = 0;
 	st.chargedCycles = 0;
@@ -752,6 +771,10 @@ std::vector<ProfileRow> profile(size_t limit)
 {
 	const State& st = state();
 	const double cyclesPerMiss = st.model.penalty().fixedCycles;
+	// Measured separately on hardware: a data fill is cheaper than an
+	// instruction fill, and a dirty eviction costs half again on top. See 9h.
+	const double cyclesPerDataMiss = st.model.penalty().dataFillCycles;
+	const double cyclesPerWriteback = st.model.penalty().writebackCycles;
 
 	// Group by symbol where there is one. Everything else is generated code or
 	// a binary with no symbols, and gets grouped by the region it lives in:
@@ -785,7 +808,8 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.calls += st.execPerFrame[i];
 		row.cycles += st.execPerFrame[i] * block.guestCycles;
 		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
-		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerMiss;
+		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerDataMiss
+				+ st.dataWbPerFrame[i] * cyclesPerWriteback;
 		row.sqFlushes += st.sqFlushPerFrame[i];
 		row.sqCycles += st.sqFlushPerFrame[i] * st.model.penalty().sqFlushCycles;
 
@@ -818,18 +842,18 @@ std::vector<ProfileRow> profile(size_t limit)
 	// flushes per frame at 3.6 cycles is 8% of the frame, and before this was
 	// hooked none of it appeared anywhere.
 	//
-	// Operand cache cycles are still deliberately NOT added. The data-side
-	// pipeline freeze hardware reports is now accounted for by the store queue
-	// above rather than by line fills, which is what made the old 1,483 cycles
-	// per miss look absurd. What remains is a smaller and more ordinary problem
-	// - the model counts about half the operand cache misses hardware does - and
-	// until that is fixed the miss count is the wrong denominator to build a
-	// cycle figure on. See phase 9e in docs/cachesim/plan.md.
+	// Operand cache cycles ARE added, as of the miss-count validation in 9g.
+	// They were excluded on two grounds and both turned out to be wrong: the
+	// 1,483 cycles per miss that made line fills look absurd was the store
+	// queue, now charged above; and the "model finds half the misses hardware
+	// does" was an invalid comparison - different binaries, on a workload where
+	// misses are 0.06% of a frame. Measured against a known-geometry walk the
+	// miss count is exact to 0.5%. See phase 9g in docs/cachesim/plan.md.
 	std::sort(out.begin(), out.end(), [](const ProfileRow& a, const ProfileRow& b) {
 		const double ta = (a.pipeCycles > 0.0 ? a.pipeCycles : a.cycles)
-				+ a.missCycles + a.sqCycles;
+				+ a.missCycles + a.dataMissCycles + a.sqCycles;
 		const double tb = (b.pipeCycles > 0.0 ? b.pipeCycles : b.cycles)
-				+ b.missCycles + b.sqCycles;
+				+ b.missCycles + b.dataMissCycles + b.sqCycles;
 		return ta > tb;
 	});
 	if (out.size() > limit)

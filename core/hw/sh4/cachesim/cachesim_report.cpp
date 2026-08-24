@@ -142,28 +142,26 @@ void logProfile(size_t limit)
 	NOTICE_LOG(SH4, "cachesim per-function profile, per frame"
 			" (pipeline cycles are issue+interlock, hardware-checked;"
 			" cache columns are derived from miss counts)");
-	NOTICE_LOG(SH4, "  %-34s %9s %7s %8s %8s %8s %8s %8s %9s",
+	NOTICE_LOG(SH4, "  %-34s %9s %7s %8s %8s %8s %8s %8s %8s %9s",
 			"function", "cycles", "%frame", "flow-dep", "resource", "stage",
-			"icache", "storeq", "calls");
+			"icache", "dcache", "storeq", "calls");
 
 	for (const ProfileRow& r : rows)
 	{
 		const double pipe = r.pipeCycles > 0.0 ? r.pipeCycles : r.cycles;
-		// Store queue cycles are in; operand cache cycles are excluded on
-		// purpose. See the ranking comment in profile().
-		const double total = pipe + r.missCycles + r.sqCycles;
+		const double total = pipe + r.missCycles + r.dataMissCycles + r.sqCycles;
 		if (total < 1.0)
 			continue;
 		// Stall columns are events, so they are shown as a share of this row's
 		// own stalls rather than as cycles, which they are not.
 		const double ev = r.pipeFlowDep + r.pipeResource + r.pipeStage;
-		NOTICE_LOG(SH4, "  %-34s %9.0f %6.1f%% %7.0f%% %7.0f%% %7.0f%% %8.0f %8.0f %9.1f%s",
+		NOTICE_LOG(SH4, "  %-34s %9.0f %6.1f%% %7.0f%% %7.0f%% %7.0f%% %8.0f %8.0f %8.0f %9.1f%s",
 				r.name.c_str(), total,
 				frameCycles == 0.0 ? 0.0 : 100.0 * total / frameCycles,
 				ev == 0.0 ? 0.0 : 100.0 * r.pipeFlowDep / ev,
 				ev == 0.0 ? 0.0 : 100.0 * r.pipeResource / ev,
 				ev == 0.0 ? 0.0 : 100.0 * r.pipeStage / ev,
-				r.missCycles, r.sqCycles, r.calls,
+				r.missCycles, r.dataMissCycles, r.sqCycles, r.calls,
 				r.pipeComplete ? "" : " *");
 	}
 	NOTICE_LOG(SH4, "  (* = a block in this row had an opcode with no pipeline"

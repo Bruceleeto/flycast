@@ -95,6 +95,12 @@ struct PenaltyConfig
 {
 	PenaltyModel model = PenaltyModel::Fixed;
 	double fixedCycles = 16.8;
+	// Operand cache line fill, measured separately from the instruction side
+	// because there was never a reason to believe they were the same number and
+	// they are not. 14.3 cycles: `build/occost` on hardware puts a read that
+	// misses at 20.3 cycles against 6.0 for the same walk hitting, and the
+	// 14.3 difference is data-side pipeline freeze to three digits. See 9h.
+	double dataFillCycles = 14.3;
 	double rowHitCycles = 14.0;
 	double rowMissCycles = 24.0;
 	u32 rowShift = 12;
@@ -103,7 +109,19 @@ struct PenaltyConfig
 	// most of the cost, and flycast's own timing model only stalls when that
 	// buffer is still busy. Charging a full line burst here would overstate it,
 	// so the count is reported and the cycles are left to whoever measures them.
-	double writebackCycles = 0.0;
+	// Evicting a dirty line. Was zero, on the reasoning that the SH4's
+	// write-back buffer hides it. The manual (SHC_PM 4.3.4) says the buffer is
+	// exactly ONE line deep and drains on the B-clock at half the CPU's rate,
+	// behind the refill - so it hides an isolated eviction and cannot hide a
+	// stream of them, which is the case that matters. Measured at 21.9: a walk
+	// that misses AND evicts dirty costs 36.2 over the hit baseline against
+	// 14.3 for a clean fill.
+	//
+	// Charged per writeback, so a workload that evicts rarely still pays close
+	// to nothing. That is not the same as modelling the buffer - a proper model
+	// would charge only when a second eviction finds it still busy - but it is
+	// right for streaming writes and harmless for occasional ones.
+	double writebackCycles = 21.9;
 	// Cycles the CPU actually stalls per 32-byte store queue flush.
 	//
 	// This is NOT the transfer time. A flush is asynchronous: the CPU only
@@ -531,7 +549,7 @@ public:
 
 		recordMiss(stream, pc, lineAddr, line.valid ? line.lineAddr : INVALID_LINE,
 				index, write, kind);
-		total.missCycles[(int)stream] += fillCycles(cache, lineAddr);
+		total.missCycles[(int)stream] += fillCycles(cache, lineAddr, stream);
 
 		line.valid = true;
 		line.tag = tag;
@@ -586,7 +604,7 @@ public:
 
 		recordMiss(Stream::Data, pc, lineAddr, line.valid ? line.lineAddr : INVALID_LINE,
 				index, write, kind);
-		total.missCycles[(int)Stream::Data] += fillCycles(cache, lineAddr);
+		total.missCycles[(int)Stream::Data] += fillCycles(cache, lineAddr, Stream::Data);
 
 		if (line.valid && line.dirty)
 		{
@@ -736,10 +754,11 @@ public:
 private:
 	// Cycle derivation. Never measured: the model in use is reported next to
 	// every figure that comes out of here.
-	double fillCycles(Cache& cache, u32 lineAddr)
+	double fillCycles(Cache& cache, u32 lineAddr, Stream stream)
 	{
 		if (penaltyCfg.model == PenaltyModel::Fixed)
-			return penaltyCfg.fixedCycles;
+			return stream == Stream::Data ? penaltyCfg.dataFillCycles
+					: penaltyCfg.fixedCycles;
 
 		const u32 row = lineAddr >> penaltyCfg.rowShift;
 		const bool rowHit = cache.lastRow == row;

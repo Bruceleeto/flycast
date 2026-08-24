@@ -97,11 +97,12 @@ static std::vector<BlockRow> blocksIn(u32 start, u32 end)
 }
 
 // A row's cost, matching logProfile() exactly: hardware-checked pipeline cycles
-// where the model produced any, instruction cache fill, and store queue. Operand
-// cache is excluded - see the ranking comment in profile().
+// where the model produced any, instruction cache fill, operand cache fill, and
+// store queue. All four, since the operand cache miss count was validated in 9g.
 static double rowTotal(const cachesim::ProfileRow& r)
 {
-	return (r.pipeCycles > 0.0 ? r.pipeCycles : r.cycles) + r.missCycles + r.sqCycles;
+	return (r.pipeCycles > 0.0 ? r.pipeCycles : r.cycles)
+			+ r.missCycles + r.dataMissCycles + r.sqCycles;
 }
 
 // A wrapped tooltip. SetTooltip does not wrap, and every one of these is a
@@ -190,6 +191,9 @@ static const char *verdict(const cachesim::ProfileRow& r, double total)
 	if (r.sqCycles > total * 0.25)
 		return "Held up sending data out of the CPU. Instruction scheduling will "
 				"not touch this - it takes fewer or smaller vertices.";
+	if (r.dataMissCycles > total * 0.25)
+		return "Held up waiting for data. The access pattern is fighting the "
+				"cache - change the data layout, not the code.";
 	if (r.missCycles > total * 0.25)
 		return "Held up fetching its own code. This is a layout problem: move "
 				"functions apart so hot ones stop evicting each other.";
@@ -507,7 +511,7 @@ void drawCacheSimPanel()
 		tableHeight -= blockHeight;
 	}
 
-	if (ImGui::BeginTable("##profile", 8,
+	if (ImGui::BeginTable("##profile", 9,
 			ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit,
 			ImVec2(0.f, tableHeight)))
 	{
@@ -519,6 +523,7 @@ void drawCacheSimPanel()
 		ImGui::TableSetupColumn("res", ImGuiTableColumnFlags_WidthFixed, uiScaled(34.f));
 		ImGui::TableSetupColumn("stage", ImGuiTableColumnFlags_WidthFixed, uiScaled(38.f));
 		ImGui::TableSetupColumn("i$", ImGuiTableColumnFlags_WidthFixed, uiScaled(30.f));
+		ImGui::TableSetupColumn("d$", ImGuiTableColumnFlags_WidthFixed, uiScaled(30.f));
 		ImGui::TableSetupColumn("sq", ImGuiTableColumnFlags_WidthFixed, uiScaled(30.f));
 
 		// Every label here is jargon. Hovering any of them explains what it is
@@ -562,7 +567,13 @@ void drawCacheSimPanel()
 				"This is a layout problem, not a code problem. The fix is moving "
 				"functions so hot ones stop evicting each other, not rewriting "
 				"them.");
-		header(7, "STORE QUEUE - the share of this row spent waiting for 32-byte "
+		header(7, "OPERAND CACHE - the share of this row spent waiting for DATA "
+				"rather than for code.\n\n"
+				"High here means the access pattern is fighting the cache: walking "
+				"memory with a stride that skips whole lines, or bouncing between "
+				"addresses that land in the same cache slot. The fix is usually to "
+				"change the data layout rather than the code.");
+		header(8, "STORE QUEUE - the share of this row spent waiting for 32-byte "
 				"blocks to drain out to the tile accelerator or to RAM.\n\n"
 				"No amount of instruction scheduling fixes this one. It comes down "
 				"either way to sending less data - fewer vertices, or smaller "
@@ -638,6 +649,7 @@ void drawCacheSimPanel()
 
 			// Waiting on code, then waiting on the bus. Different fixes.
 			ImGui::TableNextColumn(); shareCell(row.missCycles, total);
+			ImGui::TableNextColumn(); shareCell(row.dataMissCycles, total);
 			ImGui::TableNextColumn(); shareCell(row.sqCycles, total);
 		}
 		ImGui::EndTable();
