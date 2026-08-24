@@ -53,6 +53,9 @@ void TextureCacheData::UploadToGPUGl2(int width, int height, const u8 *temp_tex_
 	GLuint internalFormat;
 	u32 bytes_per_pixel;
 	getOpenGLTexParams(tex_type, bytes_per_pixel, gltype, comps, internalFormat);
+	if (bytes_per_pixel == 1)
+		// Rows of a byte-per-texel texture aren't necessarily 4-byte aligned
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
 	if (mipmapsIncluded)
 	{
@@ -103,6 +106,9 @@ void TextureCacheData::UploadToGPUGl4(int width, int height, const u8 *temp_tex_
 	else {
 		glcache.BindTexture(GL_TEXTURE_2D, texID);
 	}
+	if (bytes_per_pixel == 1)
+		// Rows of a byte-per-texel texture aren't necessarily 4-byte aligned
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 	if (mipmapsIncluded)
 	{
 		for (int i = 0; i < mipmapLevels; i++) {
@@ -135,6 +141,23 @@ void TextureCacheData::setUploadToGPUFlavor()
 #endif
 }
 
+void TextureCacheData::UploadVQCodebook(const u32 *codebook)
+{
+	if (vqCodebookID == 0)
+	{
+		vqCodebookID = glcache.GenTexture();
+		glcache.BindTexture(GL_TEXTURE_2D, vqCodebookID);
+		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glcache.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	}
+	else
+		glcache.BindTexture(GL_TEXTURE_2D, vqCodebookID);
+	// 4 texels per codebook entry, one entry per row
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 4, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, codebook);
+}
+
 bool TextureCacheData::Delete()
 {
 	if (!BaseTextureCacheData::Delete())
@@ -143,6 +166,10 @@ bool TextureCacheData::Delete()
 	if (texID != 0) {
 		glcache.DeleteTextures(1, &texID);
 		texID = 0;
+	}
+	if (vqCodebookID != 0) {
+		glcache.DeleteTextures(1, &vqCodebookID);
+		vqCodebookID = 0;
 	}
 
 	return true;

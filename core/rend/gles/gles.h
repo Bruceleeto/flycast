@@ -59,6 +59,7 @@ struct PipelineShader
 	GLint fog_clamp_min, fog_clamp_max;
 	GLint ndcMat;
 	GLint palette_index;
+	GLint vqBlock;
 	GLint ditherDivisor;
 	GLint texSize;
 
@@ -114,7 +115,7 @@ struct PipelineShader
 	bool pp_BumpMap;
 	bool fog_clamping;
 	bool trilinear;
-	int palette;	// 1 if nearest, 2 if bilinear
+	int palette;	// 1/2: gpu palette, nearest/bilinear. 3/4: gpu VQ, nearest/bilinear
 	bool naomi2;
 	bool divPosZ;
 	bool dithering;
@@ -453,11 +454,14 @@ public:
 	}
 	TextureCacheData(TextureCacheData&& other) : BaseTextureCacheData(std::move(other)) {
 		std::swap(texID, other.texID);
+		std::swap(vqCodebookID, other.vqCodebookID);
 	}
 
 	GLuint texID = 0;   //gl texture
+	GLuint vqCodebookID = 0;	// 4x256 rgba lookup table for shader-decoded VQ
 	std::string GetId() override { return std::to_string(texID); }
 	void UploadToGPU(int width, int height, const u8 *temp_tex_buffer, bool mipmapped, bool mipmapsIncluded = false) override;
+	void UploadVQCodebook(const u32 *codebook) override;
 	bool Delete() override;
 
 	static void setUploadToGPUFlavor();

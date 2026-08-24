@@ -27,6 +27,10 @@ extern u32 pal_hash_16[64];
 
 void palette_update();
 
+// Extracts the VQ index data into raster order, one byte per codebook block
+// (4x1 texels when planar, 2x2 when twiddled).
+void vqExtractIndices(u8 *dst, const u8 *src, u32 width, u32 height, u32 stride, bool twiddled);
+
 template<typename Pixel>
 class PixelBuffer
 {

@@ -427,6 +427,29 @@ void texture_VQ(PixelBuffer<typename PixelConvertor::unpacked_type>* pb, const u
 	}
 }
 
+// Copies the VQ index data, one byte per codebook block, into raster order so
+// it can be uploaded as an 8-bit texture and decoded by the fragment shader.
+// Planar data is already in raster order (4x1 blocks). Twiddled data (2x2
+// blocks) is gathered through the twiddle tables.
+void vqExtractIndices(u8 *dst, const u8 *src, u32 width, u32 height, u32 stride, bool twiddled)
+{
+	if (!twiddled)
+	{
+		const u32 blocks = width / 4;
+		const u32 srcBlocks = stride / 4;
+		for (u32 y = 0; y < height; y++)
+			memcpy(dst + y * blocks, src + y * srcBlocks, blocks);
+	}
+	else
+	{
+		const u32 bcx = bitscanrev(width);
+		const u32 bcy = bitscanrev(height);
+		for (u32 y = 0; y < height; y += 2)
+			for (u32 x = 0; x < width; x += 2)
+				*dst++ = src[twop(x, y, bcx, bcy) / 4];
+	}
+}
+
 //Twiddle
 const TexConvFP tex565_TW = texture_TW<ConvertTwiddle<UnpackerNop<u16>>>;
 // Palette

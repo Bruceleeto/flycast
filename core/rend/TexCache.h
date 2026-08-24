@@ -77,6 +77,7 @@ public:
 		custom_height = other.custom_height;
 		custom_load_in_progress = 0;
 		gpuPalette = other.gpuPalette;
+		gpuVQ = other.gpuVQ;
 		area = other.area;
 	}
 
@@ -112,6 +113,7 @@ public:
 	std::atomic_int custom_load_in_progress;
 	bool is_custom_replaced;	// True if the texture currently on the GPU is the custom replacement
 	bool gpuPalette;
+	bool gpuVQ;			// VQ decompression is done by the fragment shader
 	u8 area;
 
 	void PrintTextureName();
@@ -150,6 +152,9 @@ public:
 	void ComputeHash();
 	bool Update();
 	virtual void UploadToGPU(int width, int height, const u8 *temp_tex_buffer, bool mipmapped, bool mipmapsIncluded = false) = 0;
+	// Uploads the 256-entry VQ codebook, unpacked to 4 RGBA texels per entry.
+	// Only called on backends that report support through IsGpuHandledVQ().
+	virtual void UploadVQCodebook(const u32 *codebook) {}
 	virtual bool Force32BitTexture(TextureType type) const { return false; }
 	void CheckCustomTexture();
 	//true if : dirty or paletted texture and hashes don't match
@@ -175,6 +180,32 @@ public:
 				&& !tcw.VQ_Comp
 				&& area == 0;
 	}
+	// VQ textures can be decompressed by the fragment shader instead of on the
+	// cpu: the index data is uploaded as-is and the codebook as a small lookup
+	// texture. That turns a full-size rgba conversion into a copy of the index
+	// data, which for a 1024x1024 planar texture is 256 KB instead of 4 MB.
+	// Same restrictions as gpu palettes, plus:
+	//  - no mipmaps: every level has its own codebook
+	//  - no paletted formats: their codebook entries don't cover one block
+	//  - no yuv: the twiddled entry layout doesn't match the planar unpacker
+	//    used to build the codebook texture
+	static bool IsGpuHandledVQ(TSP tsp, TCW tcw)
+	{
+		return tcw.VQ_Comp
+				&& config::RendererType == RenderType::OpenGL
+				&& config::TextureUpscale == 1
+				&& !config::DumpTextures
+				&& !custom_texture.enabled()
+				&& !tcw.MipMapped
+				&& tcw.PixelFmt != PixelPal4
+				&& tcw.PixelFmt != PixelPal8
+				&& tcw.PixelFmt != PixelYUV;
+	}
+	// Texels covered by one codebook entry. Planar VQ stores them as a 4x1 run,
+	// twiddled VQ as a 2x2 block.
+	int vqBlockWidth() const { return tcw.ScanOrder ? 4 : 2; }
+	int vqBlockHeight() const { return tcw.ScanOrder ? 1 : 2; }
+
 	static void SetDirectXColorOrder(bool enabled);
 };
 

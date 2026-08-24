@@ -139,6 +139,11 @@ uniform sampler2D tex,fog_table;
 uniform lowp float trilinear_alpha;
 uniform lowp vec4 fog_clamp_min;
 uniform lowp vec4 fog_clamp_max;
+#if pp_Palette >= 3
+uniform sampler2D vqCodebook;
+// texels covered by one codebook entry: 4x1 when planar, 2x2 when twiddled
+uniform mediump vec2 vqBlock;
+#endif
 #if pp_Palette != 0
 uniform sampler2D palette;
 uniform mediump int palette_index;
@@ -250,6 +255,72 @@ lowp vec4 palettePixelBilinear(highp vec3 coords)
 
 #endif
 
+#if pp_Palette >= 3
+
+// Size of the index texture, i.e. the texture measured in codebook blocks
+highp vec2 vqIndexSize()
+{
+#if TARGET_GL == GLES2 || TARGET_GL == GL2
+	return texSize;
+#else
+	return vec2(textureSize(tex, 0));
+#endif
+}
+
+// Decodes one texel: the index texture selects a codebook entry and the
+// position within the block selects one of that entry's 4 texels.
+lowp vec4 vqTexel(highp vec2 uv, highp vec2 indexSize)
+{
+	highp float index = texture(tex, uv).FOG_CHANNEL;
+	highp vec2 sub = floor(fract(uv * indexSize) * vqBlock);
+	highp float texel = sub.x * vqBlock.y + sub.y;
+	highp float entry = floor(index * 255.0 + 0.5);
+#if TARGET_GL == GLES2 || TARGET_GL == GL2
+	return texture(vqCodebook, vec2((texel * 2.0 + 1.0) / 8.0, (entry * 2.0 + 1.0) / 512.0));
+#else
+	return texelFetch(vqCodebook, ivec2(int(texel), int(entry)), 0);
+#endif
+}
+
+#endif
+
+#if pp_Palette == 3		// VQ, nearest filtering
+
+lowp vec4 vqPixel(highp vec3 coords)
+{
+#if TARGET_GL != GLES2 && TARGET_GL != GL2 && DIV_POS_Z != 1
+	coords.xy /= coords.z;
+#endif
+	return vqTexel(coords.xy, vqIndexSize());
+}
+
+#elif pp_Palette == 4	// VQ, bi-linear filtering
+
+lowp vec4 vqPixelBilinear(highp vec3 coords)
+{
+#if TARGET_GL != GLES2 && TARGET_GL != GL2 && DIV_POS_Z != 1
+	coords.xy /= coords.z;
+#endif
+	highp vec2 indexSize = vqIndexSize();
+	highp vec2 fullSize = indexSize * vqBlock;
+
+	highp vec2 pixCoord = coords.xy * fullSize - 0.5;	// coordinates of top left texel
+	highp vec2 originPixCoord = floor(pixCoord);
+
+	lowp vec4 c00 = vqTexel((originPixCoord + vec2(0.5, 0.5)) / fullSize, indexSize);
+	lowp vec4 c10 = vqTexel((originPixCoord + vec2(1.5, 0.5)) / fullSize, indexSize);
+	lowp vec4 c01 = vqTexel((originPixCoord + vec2(0.5, 1.5)) / fullSize, indexSize);
+	lowp vec4 c11 = vqTexel((originPixCoord + vec2(1.5, 1.5)) / fullSize, indexSize);
+
+	highp vec2 weight = pixCoord - originPixCoord;
+
+	lowp vec4 temp0 = mix(c00, c10, weight.x);
+	lowp vec4 temp1 = mix(c01, c11, weight.x);
+	return mix(temp0, temp1, weight.y);
+}
+
+#endif
+
 #if TARGET_GL == GLES2
 #define depth gl_FragCoord.w
 #else
@@ -287,8 +358,12 @@ void main()
 		  #endif
 		#elif pp_Palette == 1
 			lowp vec4 texcol = palettePixel(vtx_uv);
-		#else
+		#elif pp_Palette == 2
 			lowp vec4 texcol = palettePixelBilinear(vtx_uv);
+		#elif pp_Palette == 3
+			lowp vec4 texcol = vqPixel(vtx_uv);
+		#else
+			lowp vec4 texcol = vqPixelBilinear(vtx_uv);
 		#endif
 		
 		#if pp_BumpMap == 1
@@ -729,7 +804,7 @@ PipelineShader *GetProgram(bool cp_AlphaTest, bool pp_InsideClipping,
 	rv <<= 1; rv |= pp_BumpMap;
 	rv <<= 1; rv |= fog_clamping;
 	rv <<= 1; rv |= trilinear;
-	rv <<= 2; rv |= palette;
+	rv <<= 3; rv |= palette;
 	rv <<= 1; rv |= naomi2;
 	rv <<= 1, rv |= !settings.platform.isNaomi2() && config::NativeDepthInterpolation;
 	rv <<= 1; rv |= dithering;
@@ -846,6 +921,11 @@ bool CompilePipelineShader(PipelineShader* s)
 	if (gu != -1)
 		glUniform1i(gu, 2);
 	s->palette_index = glGetUniformLocation(s->program, "palette_index");
+	// And texture 3 as the VQ codebook
+	gu = glGetUniformLocation(s->program, "vqCodebook");
+	if (gu != -1)
+		glUniform1i(gu, 3);
+	s->vqBlock = glGetUniformLocation(s->program, "vqBlock");
 
 	s->trilinear_alpha = glGetUniformLocation(s->program, "trilinear_alpha");
 	

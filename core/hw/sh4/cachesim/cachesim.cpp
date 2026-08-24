@@ -403,9 +403,10 @@ void frameBoundary()
 	// exists, so it can be toggled without recompiling anything
 	g_timing = g_armed && config::CacheSimTiming;
 
-	if (config::CacheSim != g_armed || (g_armed && config::CacheSimData != g_dataFeed))
+	const bool dataFeedWanted = config::CacheSim && config::CacheSimData;
+	if (config::CacheSim != g_armed || dataFeedWanted != g_dataFeed)
 	{
-		g_dataFeed = config::CacheSimData;
+		g_dataFeed = dataFeedWanted;
 		setArmed(config::CacheSim);
 		// setArmed does nothing when only the data feed changed, so the reset
 		// has to be unconditional here
@@ -420,7 +421,10 @@ void frameBoundary()
 void init()
 {
 	reportPath = config::CacheSimReport;
-	g_dataFeed = config::CacheSimData;
+	// The data hook is emitted into generated code and costs a call per guest
+	// access, so it has to follow the master switch: leaving the operand cache
+	// option ticked with the simulator off would slow the guest down for nothing
+	g_dataFeed = config::CacheSim && config::CacheSimData;
 	g_timing = config::CacheSim && config::CacheSimTiming;
 	if (g_timing)
 		// Loud, because from here on flycast is not emulating the same machine

@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -93,12 +94,17 @@ struct Options
 	// Symbol names for the report. Decoration only - every search works on
 	// addresses, because generated code has no symbols and never will.
 	std::string symbolPath;
+	// Names for generated code, dumped by the guest's own JIT
+	std::string jitmapPath;
 
 	// Discovery: find the regions worth moving instead of being told them
 	bool automatic = false;
 	bool reorder = false;
 	// Storms
 	bool storms = false;
+	// Flat execution profile: no cache model, just where the instructions go
+	bool profile = false;
+	size_t callerRows = 0;	// callers to break down for each of the top rows
 	u64 bucketCycles = 32768;	// ~0.16 ms, about 100 buckets per frame
 	double stormFactor = 4.0;
 	size_t reorderUnits = 4;	// functions to place
@@ -220,6 +226,7 @@ public:
 		blocks.clear();
 		u64 frames = 0;
 		u64 cycle = 0;
+		executions = 0;
 
 		for (;;)
 		{
@@ -231,6 +238,7 @@ public:
 				const u32 id = (u32)(v - 1);
 				if (id < blocks.size())
 				{
+					executions++;
 					if (watcher == nullptr)
 					{
 						execute(model, blocks[id], opt);
@@ -292,7 +300,81 @@ public:
 		return frames;
 	}
 
+	// Counts where the instructions go, without modelling anything. The cache
+	// report ranks by misses, which is a different question from where the time
+	// is: a function can be most of the frame and never miss.
+	// `edges` is keyed by (previous block << 32 | this block), which is the call
+	// graph the trace already contains without recording anything extra.
+	struct Profile
+	{
+		std::vector<u64> execs;
+		std::unordered_map<u64, u64> edges;
+		u64 frames = 0;
+	};
+
+	Profile profile()
+	{
+		Profile p;
+		pos = headerEnd;
+		blocks.clear();
+		u32 prev = UINT32_MAX;
+		for (;;)
+		{
+			if (pos >= bytes.size())
+				break;
+			const u64 v = readVarint();
+			if (v != 0)
+			{
+				const u32 id = (u32)(v - 1);
+				if (id < blocks.size())
+				{
+					if (id >= p.execs.size())
+						p.execs.resize(blocks.size(), 0);
+					p.execs[id]++;
+					if (prev != UINT32_MAX && prev != id && p.edges.size() < (4u << 20))
+						p.edges[((u64)prev << 32) | id]++;
+					prev = id;
+				}
+				continue;
+			}
+			const u8 event = bytes[pos++];
+			if (event == TraceEvent::DefineBlock)
+			{
+				const u32 id = (u32)readVarint();
+				Block b;
+				b.vaddr = (u32)readVarint();
+				b.paddr = (u32)readVarint();
+				b.size = (u32)readVarint();
+				b.hash = readVarint();
+				if (id >= blocks.size())
+					blocks.resize(id + 1);
+				blocks[id] = b;
+				if (id >= p.execs.size())
+					p.execs.resize(id + 1, 0);
+			}
+			else if (event == TraceEvent::AddressArrayWrite)
+			{
+				readVarint();
+				readVarint();
+			}
+			else if (event == TraceEvent::FrameBoundary)
+				p.frames++;
+			else if (event == TraceEvent::Cycle)
+				readVarint();
+			else if (event == TraceEvent::End)
+				break;
+			else if (event != TraceEvent::InvalidateInst)
+			{
+				std::fprintf(stderr, "unknown trace event %u at %zu\n", event, pos);
+				break;
+			}
+		}
+		p.execs.resize(blocks.size(), 0);
+		return p;
+	}
+
 	u64 cycles() const { return lastCycle; }
+	u64 blockExecutions() const { return executions; }
 	const std::vector<Block>& blockTable() const { return blocks; }
 
 private:
@@ -366,6 +448,7 @@ private:
 	u32 icSets = 0;
 	u32 lineBytes = 0;
 	u64 lastCycle = 0;
+	u64 executions = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -480,6 +563,45 @@ bool loadElfSymbols(const std::string& path)
 
 // Region bits only: a trace records addresses as the guest used them, so the
 // same RAM appears through P1 while an ELF names it physically.
+// Names generated code from a block map the guest dumped: one line per block,
+// "LRBLK <guest_pc> <host_addr> <host_size>". Generated code has no symbols and
+// never will, but the JIT that emitted it knows exactly which guest function
+// each block came from, so this is the only way that third of the profile ever
+// gets a name.
+bool loadJitMap(const std::string& path)
+{
+	FILE *f = std::fopen(path.c_str(), "r");
+	if (f == nullptr)
+	{
+		std::fprintf(stderr, "cannot open %s\n", path.c_str());
+		return false;
+	}
+	size_t added = 0, skipped = 0;
+	char line[256];
+	while (std::fgets(line, sizeof(line), f) != nullptr)
+	{
+		u32 guest = 0, host = 0, size = 0;
+		if (std::sscanf(line, "LRBLK %x %x %u", &guest, &host, &size) != 3)
+			continue;
+		// Blocks registered but never emitted are printed with a zero host
+		// address: they occupy no space and would otherwise alias address 0
+		if (host == 0 || size == 0)
+		{
+			skipped++;
+			continue;
+		}
+		char name[32];
+		std::snprintf(name, sizeof(name), "ps1:%08x", guest);
+		g_syms.push_back({ host, size, name });
+		added++;
+	}
+	std::fclose(f);
+	std::sort(g_syms.begin(), g_syms.end(),
+			[](const Sym& a, const Sym& b) { return Shift::normalise(a.start) < Shift::normalise(b.start); });
+	std::printf("%zu generated blocks from %s (%zu never emitted)\n", added, path.c_str(), skipped);
+	return added != 0;
+}
+
 const Sym *symbolFor(u32 addr)
 {
 	const u32 a = Shift::normalise(addr);
@@ -525,6 +647,13 @@ void reportDetail(Trace& trace, const Options& opt)
 	const Counters& c = model.counters();
 	const int inst = (int)Stream::Inst;
 
+	// Instructions per block execution. A guest running JIT-generated code has
+	// far shorter blocks than a normal game, and short blocks mean the dynarec
+	// spends proportionally more of its time dispatching than executing.
+	std::printf("block executions %" PRIu64 "   instructions per execution %.2f\n",
+			trace.blockExecutions(),
+			trace.blockExecutions() == 0 ? 0.0
+					: (double)c.instFetched / trace.blockExecutions());
 	std::printf("blocks %zu   frames %" PRIu64 "   guest cycles %" PRIu64 "\n",
 			trace.blockTable().size(), frames, trace.cycles());
 	std::printf("fetches %" PRIu64 "   misses %" PRIu64 "   rate %.3f%%\n",
@@ -1046,6 +1175,111 @@ void jsonBlame(const Trace& trace, const std::map<u32, u64>& blame, u64 outOf, s
 	json.raw(grouped.empty() ? "]" : "\n      ]");
 }
 
+// Where the instructions go, ranked. No cache model runs here: this answers
+// "what executes" rather than "what misses", and the two lists disagree often
+// enough that having only one of them is misleading.
+int runProfile(Trace& trace, const Options& opt)
+{
+	const Trace::Profile p = trace.profile();
+	const std::vector<Block>& table = trace.blockTable();
+
+	// An SH4 instruction is two bytes, so a block's size is its instruction
+	// count doubled. Attribution is by the block's start address: a block that
+	// runs past the end of a function is rare and splitting it would need the
+	// disassembly this tool deliberately does not do.
+	std::map<std::string, u64> instrs;
+	std::map<std::string, u64> calls;
+	u64 total = 0;
+	for (size_t id = 0; id < p.execs.size() && id < table.size(); id++)
+	{
+		if (p.execs[id] == 0)
+			continue;
+		const u64 n = p.execs[id] * (table[id].size / 2);
+		total += n;
+		const Sym *sym = symbolFor(table[id].paddr);
+		char name[64];
+		if (sym != nullptr)
+			std::snprintf(name, sizeof(name), "%s", sym->name.c_str());
+		else
+		{
+			const u32 base = Shift::normalise(table[id].paddr) & ~0xffffu;
+			std::snprintf(name, sizeof(name), "%08x-%08x", base, base + 0x10000);
+		}
+		instrs[name] += n;
+		calls[name] += p.execs[id];
+	}
+
+	std::vector<std::pair<std::string, u64>> sorted(instrs.begin(), instrs.end());
+	std::sort(sorted.begin(), sorted.end(),
+			[](const std::pair<std::string, u64>& a, const std::pair<std::string, u64>& b) {
+				return a.second > b.second;
+			});
+
+	const double frames = p.frames == 0 ? 1.0 : (double)p.frames;
+	std::printf("%" PRIu64 " frames, %" PRIu64 " instructions executed, %.0f per frame\n\n",
+			p.frames, total, total / frames);
+	std::printf("%-42s %14s %7s %12s\n", "where", "instr/frame", "share", "blocks/frame");
+	const size_t rows = opt.topN == 0 ? 20 : opt.topN;
+	for (size_t i = 0; i < sorted.size() && i < rows; i++)
+		std::printf("%-42s %14.0f %6.2f%% %12.0f\n", sorted[i].first.c_str(),
+				sorted[i].second / frames,
+				total == 0 ? 0.0 : 100.0 * (double)sorted[i].second / (double)total,
+				calls[sorted[i].first] / frames);
+
+	if (opt.callerRows == 0)
+		return 0;
+
+	// Who reaches each of the top rows. A transition between two blocks in
+	// different functions is a call edge, and its count is the weight: the
+	// trace already holds the call graph, it just was never read out.
+	std::printf("\ncallers\n");
+	for (size_t i = 0; i < sorted.size() && i < opt.callerRows; i++)
+	{
+		std::map<std::string, u64> from;
+		for (const auto& e : p.edges)
+		{
+			const u32 src = (u32)(e.first >> 32);
+			const u32 dst = (u32)e.first;
+			if (src >= table.size() || dst >= table.size())
+				continue;
+			const Sym *ds = symbolFor(table[dst].paddr);
+			char dname[64];
+			if (ds != nullptr)
+				std::snprintf(dname, sizeof(dname), "%s", ds->name.c_str());
+			else
+			{
+				const u32 base = Shift::normalise(table[dst].paddr) & ~0xffffu;
+				std::snprintf(dname, sizeof(dname), "%08x-%08x", base, base + 0x10000);
+			}
+			if (sorted[i].first != dname)
+				continue;
+			const Sym *ss = symbolFor(table[src].paddr);
+			char sname[64];
+			if (ss != nullptr)
+				std::snprintf(sname, sizeof(sname), "%s", ss->name.c_str());
+			else
+			{
+				const u32 base = Shift::normalise(table[src].paddr) & ~0xffffu;
+				std::snprintf(sname, sizeof(sname), "%08x-%08x", base, base + 0x10000);
+			}
+			if (sname == sorted[i].first)
+				continue;	// internal branch, not a call in
+			from[sname] += e.second;
+		}
+		std::vector<std::pair<std::string, u64>> fs(from.begin(), from.end());
+		std::sort(fs.begin(), fs.end(),
+				[](const std::pair<std::string, u64>& a, const std::pair<std::string, u64>& b) {
+					return a.second > b.second;
+				});
+		std::printf("  %s\n", sorted[i].first.c_str());
+		for (size_t j = 0; j < fs.size() && j < 5; j++)
+			std::printf("      %-38s %12.0f entries/frame\n", fs[j].first.c_str(), fs[j].second / frames);
+		if (fs.empty())
+			std::printf("      (no cross-function entries seen)\n");
+	}
+	return 0;
+}
+
 int runStorms(Trace& trace, const Options& opt)
 {
 	if (opt.bucketCycles < 4096)
@@ -1249,6 +1483,9 @@ void usage(const char *exe)
 		"  --symbols file.elf        name regions and functions from an ELF\n"
 		"  --json file.json          also write the result as JSON, for diffing one\n"
 		"                            experiment against the next\n"
+		"  --jitmap file             name generated code from a guest JIT block map\n"
+		"  --profile                 rank where the instructions go, no cache model\n"
+		"  --callers n               with --profile, break down callers of the top n\n"
 		"  --storms                  find bursts of misses in time and say what\n"
 		"                            caused them\n"
 		"  --storm-bucket n          bucket width in guest cycles (default 32768)\n"
@@ -1307,6 +1544,12 @@ int main(int argc, char *argv[])
 			opt.automatic = true;
 		else if (arg == "--reorder")
 			opt.reorder = true;
+		else if (arg == "--jitmap" && i + 1 < argc)
+			opt.jitmapPath = argv[++i];
+		else if (arg == "--profile")
+			opt.profile = true;
+		else if (arg == "--callers" && i + 1 < argc)
+			opt.callerRows = strtoul(argv[++i], nullptr, 0);
 		else if (arg == "--storms")
 			opt.storms = true;
 		else if (arg == "--storm-bucket" && i + 1 < argc)
@@ -1345,6 +1588,8 @@ int main(int argc, char *argv[])
 
 	if (!opt.symbolPath.empty())
 		loadElfSymbols(opt.symbolPath);
+	if (!opt.jitmapPath.empty())
+		loadJitMap(opt.jitmapPath);
 
 	Trace trace;
 	if (!trace.load(opt.tracePath))
@@ -1356,6 +1601,13 @@ int main(int argc, char *argv[])
 	if (opt.storms)
 	{
 		const int rv = runStorms(trace, opt);
+		json.close();
+		return rv;
+	}
+
+	if (opt.profile)
+	{
+		const int rv = runProfile(trace, opt);
 		json.close();
 		return rv;
 	}

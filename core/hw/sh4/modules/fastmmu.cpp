@@ -203,7 +203,12 @@ bool UTLB_Sync(u32 entry)
 			// Enable Full MMU if not an expected store queue mapping
 			// VPN checks to ignore many arcade and Visual Concepts games presumably bogus mappings
 			mmuOn = true;
-			NOTICE_LOG(SH4, "Enabling on-demand Full MMU support");
+			// Which mapping did it, because this switch costs every memory
+			// access in the game and the log said nothing about why
+			NOTICE_LOG(SH4, "Enabling on-demand Full MMU support: VPN %08x -> PPN %08x"
+					" (ASID %d, size %d)",
+					tlb_entry.Address.VPN << 10, tlb_entry.Data.PPN << 10,
+					tlb_entry.Address.ASID, tlb_entry.Data.SZ0 | (tlb_entry.Data.SZ1 << 1));
 			mmu_set_state();
 		}
 	}

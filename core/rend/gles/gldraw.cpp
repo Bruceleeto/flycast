@@ -138,14 +138,17 @@ void SetGPState(const PolyParam* gp,u32 cflip=0)
 	Rect clip_rect;
 	TileClipping clipmode = setTileClip(gp->tileclip, clip_rect);
 	TextureCacheData *texture = (TextureCacheData *)gp->texture;
-	int gpuPalette = texture == nullptr || !texture->gpuPalette ? 0
-			: gp->tsp.FilterMode + 1;
-	if (gpuPalette != 0)
+	// 0: regular texture, 1/2: gpu palette, 3/4: gpu VQ. Odd is nearest, even bilinear.
+	int gpuPalette = 0;
+	if (texture != nullptr && (texture->gpuPalette || texture->gpuVQ))
 	{
+		gpuPalette = gp->tsp.FilterMode + 1;
 		if (config::TextureFiltering == 1)
 			gpuPalette = 1; // force nearest
 		else if (config::TextureFiltering == 2)
 			gpuPalette = 2; // force linear
+		if (texture->gpuVQ)
+			gpuPalette += 2;
 	}
 
 	CurrentShader = GetProgram(Type == ListType_Punch_Through ? true : false,
@@ -167,7 +170,21 @@ void SetGPState(const PolyParam* gp,u32 cflip=0)
 	glcache.UseProgram(CurrentShader->program);
 	if (CurrentShader->trilinear_alpha != -1)
 		glUniform1f(CurrentShader->trilinear_alpha, trilinear_alpha);
-	if (gpuPalette != 0)
+	if (gpuPalette >= 3)
+	{
+		float block[] { (float)texture->vqBlockWidth(), (float)texture->vqBlockHeight() };
+		glUniform2fv(CurrentShader->vqBlock, 1, block);
+		if (CurrentShader->texSize != -1)
+		{
+			// The shader works in index texture coordinates, not texels
+			float texSize[] { texture->width / block[0], texture->height / block[1] };
+			glUniform2fv(CurrentShader->texSize, 1, texSize);
+		}
+		glActiveTexture(GL_TEXTURE3);
+		glBindTexture(GL_TEXTURE_2D, texture->vqCodebookID);
+		glActiveTexture(GL_TEXTURE0);
+	}
+	else if (gpuPalette != 0)
 	{
 		int paletteIndex;
 		if (gp->tcw.PixelFmt == PixelPal4)

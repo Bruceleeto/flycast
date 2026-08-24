@@ -313,6 +313,7 @@ BaseTextureCacheData::BaseTextureCacheData(TSP tsp, TCW tcw, int area)
 	custom_image_data = nullptr;
 	custom_load_in_progress = 0;
 	gpuPalette = false;
+	gpuVQ = false;
 	is_custom_replaced = false;
 
 	//decode info from tsp/tcw into the texture struct
@@ -441,6 +442,7 @@ bool BaseTextureCacheData::Update()
 	Updates++;
 	dirty = 0;
 	gpuPalette = false;
+	gpuVQ = false;
 	tex_type = tex->type;
 
 	bool has_alpha = false;
@@ -473,7 +475,14 @@ bool BaseTextureCacheData::Update()
 	}
 
 	if (tcw.VQ_Comp)
+	{
 		::vq_codebook = &vram[startAddress];
+		if (IsGpuHandledVQ(tsp, tcw))
+		{
+			tex_type = TextureType::_8;
+			gpuVQ = true;
+		}
+	}
 
 	//texture conversion work
 	u32 stride = width;
@@ -550,7 +559,28 @@ bool BaseTextureCacheData::Update()
 
 	bool mipmapped = IsMipmapped() && !config::DumpTextures;
 
-	if (texconv32 != NULL && need_32bit_buffer)
+	if (gpuVQ)
+	{
+		// Upload the index data as an 8-bit texture and the codebook as a small
+		// lookup texture. The fragment shader does the decompression.
+		const u32 blockW = vqBlockWidth();
+		const u32 blockH = vqBlockHeight();
+		upscaled_w = width / blockW;
+		upscaled_h = height / blockH;
+		pb8.init(upscaled_w, upscaled_h);
+		if (heightLimit != height)
+			memset(pb8.data(), 0, upscaled_w * upscaled_h);
+		vqExtractIndices(pb8.data(), &vram[mmStartAddress], width, heightLimit, stride, !tcw.ScanOrder);
+		// The codebook holds 256 entries of 4 texels each, laid out exactly like
+		// a planar 1024x1 texture, so the planar converter unpacks it for us.
+		PixelBuffer<u32> codebook;
+		codebook.init(256 * 4, 1);
+		tex->PL32(&codebook, &vram[startAddress], 256 * 4, 1);
+		UploadVQCodebook(codebook.data());
+		temp_tex_buffer = pb8.data();
+		mipmapped = false;
+	}
+	else if (texconv32 != NULL && need_32bit_buffer)
 	{
 		if (textureUpscaling)
 			// don't use mipmaps if upscaling
