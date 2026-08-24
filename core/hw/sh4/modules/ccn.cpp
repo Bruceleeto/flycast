@@ -9,6 +9,7 @@
 #include "hw/sh4/sh4_cache.h"
 #include "cfg/option.h"
 #include "emulator.h"
+#include "hw/sh4/cachesim/cachesim.h"
 
 CCNRegisters ccn;
 
@@ -69,12 +70,19 @@ static void CCN_CCR_write(u32 addr, u32 value)
 		//Shikigami No Shiro II uses ICI frequently
 		if (!config::DynarecEnabled)
 			icache.Invalidate();
+		// The simulated cache follows the guest's own invalidations in both
+		// modes: guest code that rewrites itself keeps stale-but-valid lines
+		// on hardware until it invalidates, and so must the model
+		if (cachesim::armed())
+			cachesim::invalidateInst();
 		temp.ICI = 0;
 	}
 	if (temp.OCI) {
 		DEBUG_LOG(SH4, "Sh4: o-cache invalidation %08X", Sh4cntx.pc);
 		if (!config::DynarecEnabled)
 			ocache.Invalidate();
+		if (cachesim::armed())
+			cachesim::invalidateData();
 		temp.OCI = 0;
 	}
 

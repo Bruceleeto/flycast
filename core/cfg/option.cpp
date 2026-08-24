@@ -137,6 +137,12 @@ Option<bool> GDBWaitForConnection("Debug.GDBWaitForConnection");
 Option<bool> UseReios("UseReios");
 Option<bool> FastGDRomLoad("FastGDRomLoad", false);
 Option<bool> RamMod32MB("Dreamcast.RamMod32MB", false);
+Option<bool> CacheSim("Debug.CacheSim", false);
+Option<std::string, false> CacheSimReport("Debug.CacheSimReport");
+Option<int> CacheSimLookahead("Debug.CacheSimLookahead", 0);
+Option<int> CacheSimSkipFrames("Debug.CacheSimSkipFrames", 0);
+Option<int> CacheSimFrames("Debug.CacheSimFrames", 0);
+Option<std::string, false> CacheSimTrace("Debug.CacheSimTrace");
 
 Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 

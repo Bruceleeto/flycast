@@ -218,6 +218,10 @@ struct settings_t
 	} naomi;
 
 	bool raHardcoreMode;
+	bool headless;
+	u32 headlessFrames;		// stop after this many emulated frames, 0 for no limit
+	u32 headlessSeconds;	// stop after this much wall clock, 0 for no limit
+	u32 headlessProgress;	// log a progress line this often, 0 to stay quiet
 };
 
 extern settings_t settings;

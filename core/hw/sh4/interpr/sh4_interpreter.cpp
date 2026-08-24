@@ -13,6 +13,7 @@
 #include "../sh4_cache.h"
 #include "debug/gdb_server.h"
 #include "../sh4_cycles.h"
+#include "hw/sh4/cachesim/cachesim.h"
 
 Sh4ICache icache;
 Sh4OCache ocache;
@@ -32,6 +33,18 @@ u16 Sh4Interpreter::ReadNexOp()
 	if (!mmu_enabled() && (addr & 1))
 		// address error
 		throw SH4ThrownException(addr, Sh4Ex_AddressErrorRead);
+
+	if (cachesim::armed())
+	{
+		// Per-instruction feed. This is the independent implementation the
+		// dynarec's block-range replay is cross-checked against, so it must not
+		// share any code with it. The cache is indexed by virtual address and
+		// tagged by physical, so both are needed: guests that enable the MMU
+		// were silently unmeasured while this only handled the identity case.
+		u32 physAddr = addr;
+		if (!mmu_enabled() || mmu_instruction_translation(addr, physAddr) == MmuError::NONE)
+			cachesim::traceFetch(addr, physAddr, 2);
+	}
 
 	ctx->pc = addr + 2;
 

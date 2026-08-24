@@ -5,6 +5,7 @@
 
 #if defined(__unix__) || defined(__HAIKU__)
 #include "log/LogManager.h"
+#include "cfg/cfg.h"
 #include "emulator.h"
 #include "ui/mainui.h"
 #include "oslib/directory.h"
@@ -254,7 +255,8 @@ int main(int argc, char* argv[])
 
 #if defined(USE_SDL)
 	// init video now: on rpi3 it installs a sigsegv handler(?)
-	if (SDL_Init(SDL_INIT_VIDEO) != 0)
+	// Skipped when headless: there may be no display to open.
+	if (!config::headlessRequested(argc, argv) && SDL_Init(SDL_INIT_VIDEO) != 0)
 	{
 		die("SDL: Initialization failed!");
 	}

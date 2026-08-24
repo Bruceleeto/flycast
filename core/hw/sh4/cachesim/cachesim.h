@@ -1,0 +1,157 @@
+/*
+	Copyright 2026 Flycast contributors
+
+	This file is part of Flycast.
+
+    Flycast is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 2 of the License, or
+    (at your option) any later version.
+
+    Flycast is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
+*/
+//
+// Guest-side SH4 cache simulator: the flycast side of it.
+//
+// The model itself is in cachesim_model.h, which knows nothing about flycast so
+// that tools/cachesweep can replay a recorded trace through the very same code.
+// This header is the live feed, the reporting and the run control.
+//
+// Miss counts are the measurement. Every cycle figure is derived from a stated
+// penalty model and is labelled as such wherever it is reported.
+//
+// See docs/cachesim/plan.md
+//
+#pragma once
+#include "types.h"
+#include "cachesim_model.h"
+
+#include <deque>
+#include <string>
+
+namespace cachesim
+{
+
+// Per-block descriptor built once at compile time and passed to the dynarec
+// hook. Lives in a pool that is stable for the whole run: compiled code holds
+// raw pointers into it and blocks outlive their RuntimeBlockInfo.
+struct BlockTrace
+{
+	u32 vaddr;	// guest virtual address of the first instruction
+	u32 paddr;	// guest physical address of the first instruction
+	u32 size;	// guest bytes covered by the block
+	u32 id;		// dense index, used as the trace stream symbol
+	u64 hash;	// hash of the guest instruction bytes: identity for JIT-resident
+			// code, whose address is not stable across runs
+};
+
+//
+// Control
+//
+// Hot path: the interpreter feed tests this per instruction, so it must not be
+// a cross-translation-unit call. Use armed(), not the variable.
+extern bool g_armed;
+inline bool armed() { return g_armed; }
+// Applies the config options. Must run before any block is translated.
+void init();
+// Only takes effect for blocks compiled afterwards, so the caller must reset
+// the code cache for the change to reach already-translated code.
+void setArmed(bool on);
+void reset();
+void term();
+
+void setPenaltyConfig(const PenaltyConfig& cfg);
+const PenaltyConfig& penaltyConfig();
+
+// The SH4 fetch unit runs ahead of execution, so a block's last line is not the
+// last line fetched. This is how many bytes past the end of a block are treated
+// as fetched. It is CALIBRATED against hardware counters, not derived from the
+// pipeline, so it is reported alongside the numbers it produces.
+void setBlockLookahead(u32 bytes);
+u32 blockLookahead();
+
+// Frames to run before the counters are cleared. The compile and load storm at
+// startup is not steady state and swamps it.
+void setSkipFrames(u32 frames);
+// Frames to measure after that, then freeze and write the report. The window
+// has to be defined in guest frames, not wall clock: two runs of the same guest
+// at different speeds otherwise measure different parts of the workload, which
+// makes their numbers incomparable.
+void setMeasureFrames(u32 frames);
+// True once the measurement window has closed. The headless loop ends the run.
+bool finished();
+
+//
+// Feeds
+//
+// Dynarec block prologue: replays the whole instruction range of a block. A
+// translated block is straight-line, so its fetch stream is exactly its address
+// range.
+void DYNACALL traceBlock(const BlockTrace *bt);
+// Per-instruction feed, used by the interpreter.
+void traceFetch(u32 vaddr, u32 paddr, u32 bytes);
+
+// Guest-driven invalidation. The instruction cache is not coherent with writes
+// to memory, so these are the ONLY things that drop lines: flycast's own block
+// invalidation must not be mirrored here.
+void invalidateInst();
+void writeInstAddressArray(u32 addr, u32 data);
+void invalidateData();
+
+// Frame boundary, for windowed output.
+void frameBoundary();
+
+//
+// Block descriptor pool
+//
+// Repeated compilations of the same block return the same descriptor, so the
+// pool is bounded by distinct guest code, not by recompilation churn.
+const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size);
+const std::deque<BlockTrace>& blocks();
+
+//
+// Results
+//
+u64 guestCycles();
+u64 frameGuestCycles();
+const Counters& counters();
+Counters frameCounters();
+u64 frameCount();
+// Counters since the last markLogWindow(), for reporting a window rather than
+// a running average.
+Counters logWindow();
+u64 logWindowCycles();
+void markLogWindow();
+
+double derivedMissCycles(Stream stream);
+const SetStat *setStats(Stream stream);
+std::vector<EvictPair> setEvictors(Stream stream, u32 set);
+std::vector<SiteStat> topSites(Stream stream, size_t limit);
+std::vector<MissRecord> recentMisses();
+void setMissRingSize(size_t records);
+
+//
+// Reporting (cachesim_report.cpp)
+//
+void logSummary();
+bool writeReport(const std::string& path);
+void setReportPath(const std::string& path);
+
+//
+// Trace recording (cachesim_trace.cpp)
+//
+// Records the block execution stream so that a layout can be re-simulated
+// offline instead of costing an emulator run per candidate.
+bool traceOpen(const std::string& path);
+void traceClose();
+bool tracing();
+void traceBlockExec(const BlockTrace *bt, u64 cycle);
+void traceEvent(u8 event, u32 a, u32 b);
+
+} // namespace cachesim

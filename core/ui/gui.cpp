@@ -36,6 +36,7 @@
 #endif
 #include "boxart/boxart.h"
 #include "profiler/fc_profiler.h"
+#include "hw/sh4/cachesim/cachesim.h"
 #include "hw/naomi/card_reader.h"
 #include "oslib/resources.h"
 #include "achievements/achievements.h"
@@ -390,6 +391,8 @@ void gui_set_insets(int left, int right, int top, int bottom)
 
 #if 0
 #include "oslib/timeseries.h"
+
+#include <cinttypes>
 #include <vector>
 TimeSeries renderTimes;
 TimeSeries vblankTimes;
@@ -1438,6 +1441,33 @@ static std::string getFPSNotification()
 	return std::string(settings.input.fastForwardMode ? ">>" : "");
 }
 
+// One line while the cache simulator is armed, so that ticking the setting is
+// visibly doing something. The counts are what is measured; the cycle figure is
+// derived from the penalty model and is not charged to the emulated timing.
+static void drawCacheSimOverlay()
+{
+	if (!cachesim::armed())
+		return;
+
+	const cachesim::Counters& frame = cachesim::frameCounters();
+	const int inst = (int)cachesim::Stream::Inst;
+	const u64 misses = frame.misses[inst];
+	const u64 conflict = frame.missKinds[inst][(int)cachesim::MissKind::Conflict];
+	const u64 cycles = cachesim::frameGuestCycles();
+
+	char text[128];
+	std::snprintf(text, sizeof(text), "cachesim  I$ %" PRIu64 " misses/frame  %" PRIu64 "%% conflict  ~%.1f%% of guest cycles",
+			misses, misses == 0 ? 0 : conflict * 100 / misses,
+			cycles == 0 ? 0.0 : 100.0 * frame.missCycles[inst] / cycles);
+
+	ImDrawList *dl = ImGui::GetForegroundDrawList();
+	const ScaledVec2 padding(5.f, 5.f);
+	const ImVec2 size = ImGui::GetFont()->CalcTextSizeA(uiLargeFontSize(), FLT_MAX, 0.f, text) + padding * 2.f;
+	const ImVec2 pos(ImGui::GetIO().DisplaySize.x - size.x - insetRight, insetTop);
+	dl->AddRectFilled(pos, pos + size, alphaOverride(0x00202020, 0.35f), 0.f);
+	dl->AddText(nullptr, uiLargeFontSize(), pos + padding, alphaOverride(0x0000FFFF, 0.7f), text);
+}
+
 void gui_draw_osd()
 {
 	gui_newFrame();
@@ -1477,6 +1507,7 @@ void gui_draw_osd()
 	}
 	if (!settings.raHardcoreMode)
 		lua::overlay();
+	drawCacheSimOverlay();
 	vgamepad::draw();
     ImGui::Render();
 	uiThreadRunner.execTasks();

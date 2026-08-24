@@ -21,6 +21,7 @@ using namespace Xbyak::util;
 #include "oslib/unwind_info.h"
 #include "oslib/virtmem.h"
 #include "cfg/option.h"
+#include "hw/sh4/cachesim/cachesim.h"
 
 static void (*mainloop)();
 static void (*handleException)();
@@ -132,6 +133,19 @@ public:
 		CheckBlock(force_checks, block);
 
 		sub(rsp, STACK_ALIGN);
+
+		if (cachesim::armed())
+		{
+			// Guest instruction cache feed. A translated block is straight-line,
+			// so its fetch stream is exactly its address range: replaying that
+			// range on entry is exact rather than an approximation, and costs a
+			// single call instead of one model step per instruction.
+			// Only emitted while armed, so arming must reset the code cache.
+			const cachesim::BlockTrace *trace = cachesim::traceForBlock(block->vaddr,
+					block->addr, block->sh4_code_size);
+			mov(call_regs64[0], (uintptr_t)trace);
+			GenCall(cachesim::traceBlock, true);
+		}
 
 		if (mmu_enabled() && block->has_fpu_op)
 		{

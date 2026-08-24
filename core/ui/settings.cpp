@@ -105,6 +105,9 @@ static void gui_settings_advanced()
 			OptionCheckbox(T("Dreamcast 32MB RAM Mod"), config::RamMod32MB,
 					T("Enables 32MB RAM Mod for Dreamcast. May affect compatibility"));
 		}
+		OptionCheckbox(T("Simulate SH4 Caches"), config::CacheSim,
+				T("Count guest instruction cache misses and what evicted them. Costs speed."
+				  " Nothing is charged to the emulated timing, so the game runs the same"));
         OptionCheckbox(T("Dump Textures"), config::DumpTextures,
         		T("Dump all textures into data/texdump/<game id>"));
 		ImGui::Indent();

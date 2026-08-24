@@ -19,6 +19,7 @@
 #include "cfg/cfg.h"
 #include "stdclass.h"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace config
@@ -30,7 +31,61 @@ static void usage(const char *exe)
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "-config section:key=value,...  set a transient config value.\n");
 	fprintf(stderr, "                               Transient config values won't be saved to emu.cfg.\n");
+	fprintf(stderr, "-headless                      run without a window, GUI or renderer.\n");
+	fprintf(stderr, "                               Requires a content path. Audio is disabled.\n");
+	fprintf(stderr, "-headless-frames n             stop after n emulated frames, then exit 0.\n");
+	fprintf(stderr, "-headless-seconds n            stop after n seconds of wall clock, then exit 0.\n");
+	fprintf(stderr, "-headless-progress n           log a progress line every n seconds.\n");
+	fprintf(stderr, "                               Any -headless-* option implies -headless.\n");
+	fprintf(stderr, "-cachesim                      simulate the guest SH4 caches and report miss\n");
+	fprintf(stderr, "                               counts. Costs speed; nothing is charged to the\n");
+	fprintf(stderr, "                               emulated timing.\n");
+	fprintf(stderr, "-cachesim-report file          write the cache report there when the run ends.\n");
+	fprintf(stderr, "                               Implies -cachesim.\n");
+	fprintf(stderr, "-cachesim-trace file           record the block execution stream, for replaying\n");
+	fprintf(stderr, "                               layout changes offline with cachesweep. Large:\n");
+	fprintf(stderr, "                               tens of MB per guest second. Implies -cachesim.\n");
+	fprintf(stderr, "-cachesim-frames n             measure n guest frames, then report and stop.\n");
+	fprintf(stderr, "                               Defines the window in guest time, so runs at\n");
+	fprintf(stderr, "                               different speeds stay comparable.\n");
+	fprintf(stderr, "-cachesim-skip n               clear the counters after n frames, to drop the\n");
+	fprintf(stderr, "                               startup storm and measure steady state.\n");
+	fprintf(stderr, "-cachesim-lookahead n          bytes fetched past the end of a block (default 16).\n");
+	fprintf(stderr, "                               Calibrated against hardware, see docs/cachesim.\n");
 	fprintf(stderr, "-help                          display this help\n");
+}
+
+// True for -headless and for every -headless-* option, since all of them need
+// the window and the display left alone. Called before the command line is
+// parsed, so it cannot rely on settings.
+bool headlessRequested(int argc, const char * const argv[])
+{
+	for (int i = 1; i < argc; i++)
+	{
+		const char *arg = argv[i];
+		if (arg[0] == '-' && arg[1] == '-')
+			arg++;
+		if (!strncmp(arg, "-headless", 9))
+			return true;
+	}
+	return false;
+}
+
+// Reads the value of an option that takes one, e.g. -headless-frames 300
+static bool optionValue(int argc, const char * const argv[], int& i, const char *name,
+		const char *& value)
+{
+	const char *arg = argv[i];
+	if (arg[0] == '-' && arg[1] == '-')
+		arg++;
+	if (strcmp(arg, name) != 0)
+		return false;
+	if (i >= argc - 1) {
+		WARN_LOG(COMMON, "Option '%s' needs a value", argv[i]);
+		return false;
+	}
+	value = argv[++i];
+	return true;
 }
 
 static void parseConfigOption(const std::string& str)
@@ -176,6 +231,52 @@ void parseCommandLine(int argc, const char * const argv[])
 		if (!strcmp(argv[i], "-help") || !strcmp(argv[i], "--help")) {
 			usage(exe);
 			exit(0);
+		}
+		if (!strcmp(argv[i], "-headless") || !strcmp(argv[i], "--headless")) {
+			settings.headless = true;
+			continue;
+		}
+		const char *value;
+		if (optionValue(argc, argv, i, "-headless-frames", value)) {
+			settings.headless = true;
+			settings.headlessFrames = (u32)strtoul(value, nullptr, 0);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-headless-seconds", value)) {
+			settings.headless = true;
+			settings.headlessSeconds = (u32)strtoul(value, nullptr, 0);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-headless-progress", value)) {
+			settings.headless = true;
+			settings.headlessProgress = (u32)strtoul(value, nullptr, 0);
+			continue;
+		}
+		if (!strcmp(argv[i], "-cachesim") || !strcmp(argv[i], "--cachesim")) {
+			setTransient("config", "Debug.CacheSim", "yes");
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-cachesim-lookahead", value)) {
+			setTransient("config", "Debug.CacheSimLookahead", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-cachesim-trace", value)) {
+			setTransient("config", "Debug.CacheSim", "yes");
+			setTransient("config", "Debug.CacheSimTrace", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-cachesim-frames", value)) {
+			setTransient("config", "Debug.CacheSimFrames", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-cachesim-skip", value)) {
+			setTransient("config", "Debug.CacheSimSkipFrames", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-cachesim-report", value)) {
+			setTransient("config", "Debug.CacheSim", "yes");
+			setTransient("config", "Debug.CacheSimReport", value);
+			continue;
 		}
 		if (!strcmp(argv[i], "-config") || !strcmp(argv[i], "--config"))
 		{

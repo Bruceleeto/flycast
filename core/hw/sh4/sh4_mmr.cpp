@@ -15,6 +15,7 @@
 
 #include <array>
 #include <map>
+#include "cachesim/cachesim.h"
 
 static std::array<u8, 0x2000> OnChipRAM;	// 8 KB
 
@@ -276,7 +277,11 @@ void DYNACALL WriteMem_P4(u32 addr,T data)
 	case 0xF0:
 		DEBUG_LOG(SH4, "IC Address write %08x = %x", addr, data);
 		if constexpr (sz == 4)
+		{
 			icache.WriteAddressArray(addr, data);
+			if (cachesim::armed())
+				cachesim::writeInstAddressArray(addr, data);
+		}
 		return;
 
 	case 0xF1:

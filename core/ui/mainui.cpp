@@ -27,8 +27,10 @@
 #include "imgui_driver.h"
 #include "profiler/fc_profiler.h"
 #include "oslib/i18n.h"
+#include "hw/sh4/cachesim/cachesim.h"
 
 #include <chrono>
+#include <csignal>
 #include <thread>
 
 static bool mainui_enabled;
@@ -93,11 +95,88 @@ void mainui_term()
 	rend_term_renderer();
 }
 
+static volatile std::sig_atomic_t headlessStopRequested;
+
+static void headlessSignalHandler(int sig)
+{
+	headlessStopRequested = 1;
+	// The flag is only checked between frames. Restore the default handler so a
+	// second signal kills outright if the current frame never returns.
+	std::signal(sig, SIG_DFL);
+}
+
+// Runs the emulator with no window, GUI or presentation. The renderer is
+// norend, so nothing is drawn.
+static void mainui_headless_loop()
+{
+	if (settings.content.path.empty())
+	{
+		ERROR_LOG(BOOT, "Headless mode requires a content path");
+		return;
+	}
+	headlessStopRequested = 0;
+	std::signal(SIGINT, headlessSignalHandler);
+	std::signal(SIGTERM, headlessSignalHandler);
+
+	mainui_init();
+	try {
+		emu.loadGame(settings.content.path.c_str());
+		// Must be after loadGame(): it resets and reloads every option.
+		config::ThreadedRendering.set(false);	// nothing presents, so no one to feed
+		config::AudioBackend.set("null");
+		emu.start();
+
+		using clock = std::chrono::steady_clock;
+		const clock::time_point start = clock::now();
+		clock::time_point nextProgress = start + std::chrono::seconds(settings.headlessProgress);
+		const u32 startFrame = MainFrameCount;
+
+		while (mainui_enabled && !headlessStopRequested && !cachesim::finished() && emu.render())
+		{
+			MainFrameCount++;
+			const u32 frames = MainFrameCount - startFrame;
+			if (settings.headlessFrames != 0 && frames >= settings.headlessFrames)
+				break;
+
+			if (settings.headlessSeconds != 0 || settings.headlessProgress != 0)
+			{
+				const clock::time_point now = clock::now();
+				const double elapsed = std::chrono::duration<double>(now - start).count();
+				if (settings.headlessSeconds != 0 && elapsed >= settings.headlessSeconds)
+					break;
+				if (settings.headlessProgress != 0 && now >= nextProgress)
+				{
+					nextProgress = now + std::chrono::seconds(settings.headlessProgress);
+					NOTICE_LOG(BOOT, "Headless: %u frames in %.1fs (%.1f fps)",
+							frames, elapsed, elapsed == 0 ? 0.0 : frames / elapsed);
+					if (cachesim::armed())
+						cachesim::logSummary();
+				}
+			}
+		}
+		const double elapsed = std::chrono::duration<double>(clock::now() - start).count();
+		NOTICE_LOG(BOOT, "Headless: stopped after %u frames in %.1fs (%.1f fps)",
+				MainFrameCount - startFrame, elapsed,
+				elapsed == 0 ? 0.0 : (MainFrameCount - startFrame) / elapsed);
+		if (cachesim::armed())
+			cachesim::logSummary();
+		emu.unloadGame();
+	} catch (const FlycastException& e) {
+		ERROR_LOG(BOOT, "Headless: %s", e.what());
+	}
+	mainui_term();
+}
+
 void mainui_loop(bool forceStart)
 {
 	ThreadName _("Flycast-rend");
 	if (forceStart)
 		mainui_enabled = true;
+	if (settings.headless)
+	{
+		mainui_headless_loop();
+		return;
+	}
 	mainui_init();
 	RenderType currentRenderer = config::RendererType;
 

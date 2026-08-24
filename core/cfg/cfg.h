@@ -21,6 +21,7 @@ void setTransient(const std::string& section, const std::string& key, const std:
 bool isTransient(const std::string& section, const std::string& key);
 
 void parseCommandLine(int argc, const char * const argv[]);
+bool headlessRequested(int argc, const char * const argv[]);
 
 void setAutoSave(bool autoSave);
 bool hasSection(const std::string& section);

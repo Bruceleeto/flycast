@@ -493,6 +493,14 @@ extern Option<bool> GDBWaitForConnection;
 extern Option<bool> UseReios;
 extern Option<bool> FastGDRomLoad;
 extern Option<bool> RamMod32MB;
+// Guest SH4 cache simulation. Costs speed and changes nothing about how the
+// game runs: the modelled miss penalties are not charged to the emulated timing.
+extern Option<bool> CacheSim;
+extern Option<std::string, false> CacheSimReport;
+extern Option<int> CacheSimLookahead;
+extern Option<int> CacheSimSkipFrames;
+extern Option<int> CacheSimFrames;
+extern Option<std::string, false> CacheSimTrace;
 
 extern Option<bool> OpenGlChecks;
 

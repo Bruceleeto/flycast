@@ -50,6 +50,7 @@
 #include "hw/sh4/sh4_interpreter.h"
 #include "hw/sh4/dyna/ngen.h"
 #include "oslib/i18n.h"
+#include "hw/sh4/cachesim/cachesim.h"
 
 settings_t settings;
 constexpr char const *BIOS_TITLE = "Dreamcast BIOS";
@@ -500,6 +501,8 @@ static void setPlatform(int platform)
 
 void Emulator::init()
 {
+	cachesim::init();
+
 	if (state != Uninitialized)
 	{
 		verify(state == Init);
@@ -771,6 +774,8 @@ void Emulator::unloadGame()
 
 void Emulator::term()
 {
+	cachesim::term();
+
 	unloadGame();
 	if (state == Init)
 	{
@@ -1083,6 +1088,9 @@ bool Emulator::render()
 
 void Emulator::vblank()
 {
+	if (cachesim::armed())
+		cachesim::frameBoundary();
+
 	EventManager::event(Event::VBlank);
 	runner.execTasks();
 	// Time out if a frame hasn't been rendered for 50 ms
