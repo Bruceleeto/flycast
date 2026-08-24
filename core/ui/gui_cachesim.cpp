@@ -32,22 +32,49 @@
 
 #include <cinttypes>
 
+// Hidden state lives here rather than in the config: it is a view preference
+// for this session, not something to persist and then wonder about later when
+// the panel does not appear.
+static bool panelVisible = true;
+
 void drawCacheSimPanel()
 {
 	if (!cachesim::armed())
+	{
+		// Armed again later: come back visible rather than mysteriously hidden
+		panelVisible = true;
 		return;
+	}
 
+	if (!panelVisible)
+	{
+		// Small enough to ignore, present enough to find again
+		ImGui::SetNextWindowPos(ImVec2(0.f, 0.f), ImGuiCond_Always);
+		ImGui::SetNextWindowBgAlpha(0.6f);
+		if (ImGui::Begin("##cachesimProfileHidden", nullptr,
+				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize
+				| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav))
+		{
+			if (ImGui::Button("profile"))
+				panelVisible = true;
+		}
+		ImGui::End();
+		return;
+	}
 	const double frameCycles = cachesim::profileFrameCycles();
 	const double accounted = cachesim::profileAccountedCycles();
 	const std::vector<cachesim::ProfileRow> rows = cachesim::profile(200);
 
 	const ImGuiIO& io = ImGui::GetIO();
-	ImGui::SetNextWindowPos(ImVec2(0.f, 0.f), ImGuiCond_Always);
-	ImGui::SetNextWindowSize(ImVec2(uiScaled(430.f), io.DisplaySize.y), ImGuiCond_Always);
+	// Left edge, full height, by default only: dragging the edge or the body
+	// sticks, because 430px is a guess about somebody else's screen
+	ImGui::SetNextWindowPos(ImVec2(0.f, 0.f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(uiScaled(430.f), io.DisplaySize.y), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(uiScaled(240.f), uiScaled(120.f)),
+			ImVec2(io.DisplaySize.x, io.DisplaySize.y));
 	ImGui::SetNextWindowBgAlpha(0.75f);
 	if (!ImGui::Begin("##cachesimProfile", nullptr,
-			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize
-			| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoNav))
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoNav))
 	{
 		ImGui::End();
 		return;
@@ -56,7 +83,13 @@ void drawCacheSimPanel()
 	const cachesim::Counters frame = cachesim::frameCounters();
 	const int inst = (int)cachesim::Stream::Inst;
 
+	// Right-aligned, so it does not push the numbers around
 	ImGui::Text("guest frame: %.2fM cycles", frameCycles / 1e6);
+	ImGui::SameLine(ImGui::GetContentRegionAvail().x - uiScaled(18.f));
+	if (ImGui::SmallButton("x"))
+		panelVisible = false;
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("hide this panel; measuring continues");
 	// The gap between the frame and what the rows add up to is the CPU waiting.
 	// Without showing it, every percentage below would silently be a share of
 	// work done rather than a share of the frame.
@@ -79,19 +112,34 @@ void drawCacheSimPanel()
 	else
 		ImGui::TextDisabled("ocache: not measured");
 	if (cachesim::timingFeedback())
+	{
 		// This one changes the game rather than measuring it, so it says so
-		// where the numbers are, not only in a log line at startup
-		ImGui::TextColored(ImVec4(1.f, 0.7f, 0.2f, 1.f),
-				"charging miss cycles to guest timing: this run is not a normal run");
+		// where the numbers are, not only in a log line at startup. Wrapped,
+		// because the panel is resizable and this is the longest line in it
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 0.7f, 0.2f, 1.f));
+		ImGui::TextWrapped("charging miss cycles to guest timing: not a normal run");
+		ImGui::PopStyleColor();
+	}
 	if (!cachesim::symbolsLoaded())
-		ImGui::TextDisabled("no symbols: rows are address ranges");
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+		ImGui::TextWrapped("no symbols: rows are address ranges");
+		ImGui::PopStyleColor();
+	}
 
 	ImGui::Separator();
+
+	// The footer wraps, so how much room it needs depends on how narrow the
+	// panel has been dragged. Measuring it is the only way the table below can
+	// reserve the right amount and not clip it.
+	static const char *footer = "estimated issue cycles; ranking is sound, absolutes are not";
+	const float footerHeight = ImGui::CalcTextSize(footer, nullptr, false,
+			ImGui::GetContentRegionAvail().x).y + ImGui::GetStyle().ItemSpacing.y * 2;
 
 	const int columns = cachesim::dataFeed() ? 5 : 4;
 	if (ImGui::BeginTable("##profile", columns,
 			ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit,
-			ImVec2(0.f, ImGui::GetContentRegionAvail().y - uiScaled(30.f))))
+			ImVec2(0.f, ImGui::GetContentRegionAvail().y - footerHeight)))
 	{
 		ImGui::TableSetupScrollFreeze(0, 1);
 		ImGui::TableSetupColumn("function", ImGuiTableColumnFlags_WidthStretch);
@@ -114,7 +162,15 @@ void drawCacheSimPanel()
 			else
 				ImGui::TextDisabled("%s", row.name.c_str());
 			if (ImGui::IsItemHovered())
-				ImGui::SetTooltip("%08x-%08x\n%.0f calls/frame", row.start, row.end, row.calls);
+			{
+				// Built line by line rather than as one string with a newline
+				// in it, which was rendering with the second line clipped.
+				// This form sizes each line explicitly.
+				ImGui::BeginTooltip();
+				ImGui::Text("%08x-%08x", row.start, row.end);
+				ImGui::Text("%.0f calls/frame", row.calls);
+				ImGui::EndTooltip();
+			}
 
 			ImGui::TableNextColumn();
 			ImGui::Text("%.0fk", total / 1000.0);
@@ -143,6 +199,8 @@ void drawCacheSimPanel()
 	}
 
 	// Not hardware truth, and it should not need explaining twice
-	ImGui::TextDisabled("estimated issue cycles; ranking is sound, absolutes are not");
+	ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+	ImGui::TextWrapped("%s", footer);
+	ImGui::PopStyleColor();
 	ImGui::End();
 }
