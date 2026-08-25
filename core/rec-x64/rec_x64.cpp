@@ -244,7 +244,7 @@ public:
 							add(call_regs[0], dword[rax]);
 						}
 					}
-					genDataCacheHook(op, false);
+					genDataCacheHook(block, op, false);
 					genMmuLookup(block, op, 0);
 
 					int size = op.size == 1 ? MemSize::S8 : op.size == 2 ? MemSize::S16 : op.size == 4 ? MemSize::S32 : MemSize::S64;
@@ -282,7 +282,7 @@ public:
 							add(call_regs[0], dword[rax]);
 						}
 					}
-					genDataCacheHook(op, true);
+					genDataCacheHook(block, op, true);
 					genMmuLookup(block, op, 1);
 
 #if ALLOC_F64 == false
@@ -834,13 +834,33 @@ private:
 	// call_regs[0] already holds the guest address. It and the scratch register
 	// are preserved across the call; everything the register allocator uses is
 	// callee-saved on both ABIs, and GenCall spills the mapped xmm registers.
-	void genDataCacheHook(const shil_opcode& op, bool write)
+	void genDataCacheHook(const RuntimeBlockInfo *block, const shil_opcode& op,
+			bool write)
 	{
 		if (!cachesim::dataFeed())
 			return;
+		u32 packed = op.size | (write ? cachesim::ACCESS_WRITE : 0);
+		// movca.l allocates its line without reading it in, so it must not be
+		// charged a fill. shil has lowered it to an ordinary store by this
+		// point, so the only way to tell is to look at the guest instruction
+		// that produced this op - which is free, because it happens once at
+		// compile time and the result is baked into the immediate below.
+		// Read the guest instruction through the PHYSICAL address. Going via
+		// the virtual one means going through the MMU, and an MMU lookup from
+		// inside the recompiler can fault - which killed any MMU-using guest
+		// stone dead the moment this went in. block->addr is what the block
+		// pool already uses to read the same bytes for hashing.
+		if (write)
+		{
+			const u32 paddr = block->addr + op.guest_offs - (op.delay_slot ? 1 : 0);
+			const u8 *mem = GetMemPtr(paddr, 2);
+			if (mem != nullptr
+					&& cachesim::isAllocatingStore((u16)(mem[0] | (mem[1] << 8))))
+				packed |= cachesim::ACCESS_ALLOCATE;
+		}
 		push(call_regs64[0]);
 		push(rax);		// no value of ours, but it keeps rsp 16-byte aligned
-		mov(call_regs[1], op.size | (write ? 0x100 : 0));
+		mov(call_regs[1], packed);
 		GenCall(cachesim::dataAccess);
 		pop(rax);
 		pop(call_regs64[0]);

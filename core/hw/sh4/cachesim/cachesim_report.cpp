@@ -101,13 +101,14 @@ void logSummary()
 		const int data = (int)Stream::Data;
 		NOTICE_LOG(SH4, "cachesim frame %" PRIu64 " ocache window: %" PRIu64 " misses"
 				" (%.3f%% of %" PRIu64 " accesses) %" PRIu64 "%% conflict"
-				" | %" PRIu64 " writebacks | derived %.1f%% of guest cycles",
+				" | %" PRIu64 " writebacks | %" PRIu64 " movca.l"
+				" | derived %.1f%% of guest cycles",
 				frameCount(), window.misses[data],
 				window.dataAccesses == 0 ? 0.0 : 100.0 * window.misses[data] / window.dataAccesses,
 				window.dataAccesses,
 				window.misses[data] == 0 ? 0
 						: window.missKinds[data][(int)MissKind::Conflict] * 100 / window.misses[data],
-				window.writebacks,
+				window.writebacks, window.allocatingStores,
 				windowCycles == 0 ? 0.0 : 100.0 * window.missCycles[data] / windowCycles);
 	}
 
@@ -142,9 +143,9 @@ void logProfile(size_t limit)
 	NOTICE_LOG(SH4, "cachesim per-function profile, per frame"
 			" (pipeline cycles are issue+interlock, hardware-checked;"
 			" cache columns are derived from miss counts)");
-	NOTICE_LOG(SH4, "  %-34s %9s %7s %8s %8s %8s %8s %8s %8s %9s",
-			"function", "cycles", "%frame", "flow-dep", "resource", "stage",
-			"icache", "dcache", "storeq", "calls");
+	NOTICE_LOG(SH4, "  %-34s %9s %6s %8s %8s %8s %8s %7s %7s %7s %8s",
+			"function", "cycles", "%frm", "issue", "flow-dep", "resource",
+			"stage", "icache", "dcache", "storeq", "calls");
 
 	for (const ProfileRow& r : rows)
 	{
@@ -154,13 +155,13 @@ void logProfile(size_t limit)
 			continue;
 		// Stall columns are events, so they are shown as a share of this row's
 		// own stalls rather than as cycles, which they are not.
-		const double ev = r.pipeFlowDep + r.pipeResource + r.pipeStage;
-		NOTICE_LOG(SH4, "  %-34s %9.0f %6.1f%% %7.0f%% %7.0f%% %7.0f%% %8.0f %8.0f %8.0f %9.1f%s",
+		// Every column is cycles per frame, and they add up to `cycles`. That
+		// is what per-cycle stall attribution bought: a breakdown that can be
+		// added rather than a set of shares that cannot.
+		NOTICE_LOG(SH4, "  %-34s %9.0f %5.1f%% %8.0f %8.0f %8.0f %8.0f %7.0f %7.0f %7.0f %8.1f%s",
 				r.name.c_str(), total,
 				frameCycles == 0.0 ? 0.0 : 100.0 * total / frameCycles,
-				ev == 0.0 ? 0.0 : 100.0 * r.pipeFlowDep / ev,
-				ev == 0.0 ? 0.0 : 100.0 * r.pipeResource / ev,
-				ev == 0.0 ? 0.0 : 100.0 * r.pipeStage / ev,
+				r.pipeIssue, r.pipeFlowDep, r.pipeResource, r.pipeStage,
 				r.missCycles, r.dataMissCycles, r.sqCycles, r.calls,
 				r.pipeComplete ? "" : " *");
 	}
@@ -186,13 +187,13 @@ void logBlocks(size_t limit)
 		bool modelled;
 	};
 	std::vector<Row> rows;
-	const double sqCost = penaltyConfig().sqFlushCycles;
+
 	for (const BlockTrace& b : blocks())
 	{
 		const double execs = blockExecsPerFrame(b.id);
 		if (execs < 0.5)
 			continue;
-		const double sq = blockSqFlushesPerFrame(b.id) * sqCost;
+		const double sq = blockSqCyclesPerFrame(b.id);
 		rows.push_back({ b.vaddr, b.size, execs, execs * b.pipeCycles + sq, sq,
 				b.pipeCycles,
 				b.pipeByReason[(int)pipesim::StallReason::FlowDep],
@@ -329,6 +330,7 @@ bool writeReport(const std::string& path)
 	// Dirty lines written out. Counted, and charged only if a writeback cost
 	// has been set: the write-back buffer hides most of it.
 	fprintf(f, "    \"writebacks\": %" PRIu64 ",\n", c.writebacks);
+	fprintf(f, "    \"allocating_stores\": %" PRIu64 ",\n", c.allocatingStores);
 	fprintf(f, "    \"sq_flushes_ram\": %" PRIu64 ",\n", c.sqFlushes[(int)SqDest::Ram]);
 	fprintf(f, "    \"sq_flushes_ta\": %" PRIu64 ",\n", c.sqFlushes[(int)SqDest::Ta]);
 	fprintf(f, "    \"sq_flushes_other\": %" PRIu64 ",\n", c.sqFlushes[(int)SqDest::Other]);

@@ -1,3 +1,4 @@
+#include <climits>
 #include "pipesim.h"
 #include "pipesim_optable.h"
 #include <vector>
@@ -687,6 +688,18 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 
 		int prevStall = -1;
 		bool anyAdvanced = false;
+		// Per-CYCLE attribution. Several pipeline sequences can be blocked in
+		// the same cycle, so counting each one gives events, not time - and a
+		// breakdown in events cannot be added to anything.
+		//
+		// One cycle is charged once, to the OLDEST instruction that could not
+		// advance in it. That is the head of the machine: everything behind it
+		// is waiting on it rather than on its own hazard, which is what
+		// PrevStalled means. Picking the oldest rather than the first one
+		// scanned also makes the answer independent of the order the in-flight
+		// list happens to be in.
+		StallReason cycleReason = StallReason::None;
+		int cycleReasonInsn = INT_MAX;
 		toRemove.clear();
 		toResult.clear();
 
@@ -835,8 +848,16 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 
 			if (reason != StallReason::None)
 			{
-				res.stallCycles++;
-				res.byReason[(int)reason]++;
+				const bool real = reason != StallReason::PrevStalled;
+				const bool better = cycleReason == StallReason::None
+						|| (real && cycleReason == StallReason::PrevStalled)
+						|| (real == (cycleReason != StallReason::PrevStalled)
+								&& seq.insnIdx < cycleReasonInsn);
+				if (better)
+				{
+					cycleReason = reason;
+					cycleReasonInsn = seq.insnIdx;
+				}
 				const int i = seq.insnIdx;
 				stallOf[i]++;
 				if (reasonOf[i] == StallReason::None)
@@ -935,6 +956,14 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 				for (int r = 0; r < 64; r++)
 					if (in.writes & (1ull << r))
 						provides[r].push_back(resultSeq);
+		}
+
+		// One cycle, one entry. byReason now sums to stallCycles exactly, and
+		// stallCycles + issueCycles() == cycles.
+		if (cycleReason != StallReason::None)
+		{
+			res.stallCycles++;
+			res.byReason[(int)cycleReason]++;
 		}
 
 		if (!anyAdvanced && pc == count)

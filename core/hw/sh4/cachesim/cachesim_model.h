@@ -109,19 +109,26 @@ struct PenaltyConfig
 	// most of the cost, and flycast's own timing model only stalls when that
 	// buffer is still busy. Charging a full line burst here would overstate it,
 	// so the count is reported and the cycles are left to whoever measures them.
-	// Evicting a dirty line. Was zero, on the reasoning that the SH4's
-	// write-back buffer hides it. The manual (SHC_PM 4.3.4) says the buffer is
-	// exactly ONE line deep and drains on the B-clock at half the CPU's rate,
-	// behind the refill - so it hides an isolated eviction and cannot hide a
-	// stream of them, which is the case that matters. Measured at 21.9: a walk
-	// that misses AND evicts dirty costs 36.2 over the hit baseline against
-	// 14.3 for a clean fill.
+	// A WRITE miss, which in copy-back mode allocates and may evict a dirty
+	// line. Unlike a read miss this is spacing-dependent, because the
+	// write-back buffer holds exactly one line (SHC_PM 4.3.4) and drains on the
+	// B-clock: an isolated eviction is hidden, a stream of them is not.
 	//
-	// Charged per writeback, so a workload that evicts rarely still pays close
-	// to nothing. That is not the same as modelling the buffer - a proper model
-	// would charge only when a second eviction finds it still busy - but it is
-	// right for streaming writes and harmless for occasional ones.
-	double writebackCycles = 21.9;
+	//     cost = max(writeMissFloor, writeMissDrain - gapSinceLastWriteMiss)
+	//
+	// `tools/hwprobe/wbsweep` fits this to three decimals across seven
+	// spacings from 11 to 201 cycles - a 1:1 slope that flattens onto the
+	// floor, with a read-only control that stays flat at the fill cost
+	// throughout, so the effect is definitely the buffer and not something
+	// else that happens to vary.
+	//
+	// The floor is BELOW the read fill cost, which looks wrong and is not: a
+	// write miss does not wait for the data (manual case 3c writes into the
+	// line and lets the fill happen around it), while a read miss must.
+	double writeMissDrain = 42.2;
+	double writeMissFloor = 7.0;
+	// Superseded by the two above; kept at zero so nothing charges twice.
+	double writebackCycles = 0.0;
 	// Cycles the CPU actually stalls per 32-byte store queue flush.
 	//
 	// This is NOT the transfer time. A flush is asynchronous: the CPU only
@@ -135,7 +142,28 @@ struct PenaltyConfig
 	// frame counted here, and its 188 operand cache misses account for about
 	// 1% of that. Serialised with no work in between it is 11.1 (the RAM
 	// figure from the sqprobe harness), which is the upper bound.
-	double sqFlushCycles = 3.6;
+	// Store queue flush, per destination. FLAT: `tools/hwprobe/sqsweep` swept
+	// the gap between flushes from 16 to 205 cycles and the data-side freeze
+	// did not move - 2.0 cycles per flush at every spacing, to both RAM and the
+	// TA. The queue drains fast enough that the CPU never catches up with it,
+	// so there is nothing for a spacing model to represent.
+	//
+	// This replaced a spacing model built on the assumption that it would, and
+	// the assumption survived exactly as long as it took to measure.
+	//
+	// Both destinations measure the same, and it does not move when the burst
+	// is lengthened from 64 flushes to 2048 either - so this is not the TA's
+	// input FIFO absorbing a short burst.
+	//
+	// It does NOT reconcile with `bruces_balls`, where total data-side freeze
+	// over total flushes is 3.6. At 2.0 per flush that workload has about
+	// 124,000 cycles a frame of freeze coming from somewhere else. Some of it
+	// is write misses, which are charged separately now. The rest is open - see
+	// plan 9j - and the measured number is used here rather than the inferred
+	// one, so the shortfall stays visible instead of being absorbed into a
+	// constant nobody would question later.
+	double sqFlushTa = 2.0;
+	double sqFlushRam = 2.0;
 };
 
 // Where a store queue flush landed. The SH4 drains a 32-byte queue to an
@@ -183,6 +211,15 @@ struct Counters
 	u64 writeThroughMisses;
 	// Dirty operand cache lines written out on eviction.
 	u64 writebacks;
+	// Misses caused by a store. Separated from the total because a write miss
+	// and a read miss cost different things for different reasons - see
+	// PenaltyConfig::writeMissDrain - and one constant for both was wrong in
+	// both directions.
+	u64 writeMisses;
+	// movca.l line allocations: misses that legitimately cost no line fill.
+	// Reported rather than silently folded in, because the difference between
+	// this and an ordinary write miss is the whole point of the instruction.
+	u64 allocatingStores;
 	double writebackCycles;
 };
 
@@ -566,7 +603,10 @@ public:
 	//
 	// `copyBack` is the caller's decode of CCR.CB / CCR.WT and the page's WT
 	// bit, because only the caller can see the MMU.
-	void touchData(u32 index, u32 lineAddr, u32 pc, bool write, bool copyBack)
+	// `allocate` is movca.l: the line is claimed without a block read, so the
+	// miss is real and the eviction is real but the fill costs nothing.
+	void touchData(u32 index, u32 lineAddr, u32 pc, bool write, bool copyBack,
+			bool allocate = false)
 	{
 		Cache& cache = oc;
 		const u32 tag = (lineAddr >> 10) & 0x7ffff;
@@ -604,7 +644,17 @@ public:
 
 		recordMiss(Stream::Data, pc, lineAddr, line.valid ? line.lineAddr : INVALID_LINE,
 				index, write, kind);
-		total.missCycles[(int)Stream::Data] += fillCycles(cache, lineAddr, Stream::Data);
+		// No fill for an allocating store: SH4 manual 4.3.8 - "the cache block
+		// will be allocated but an R0 data write will be performed to that
+		// cache block without performing a block read". Charging one here is
+		// inventing traffic the bus never carries.
+		// Read misses are charged here at the flat fill cost. Write misses are
+		// not: their cost depends on how far apart they are, which is a
+		// property of the block and so is worked out in profile().
+		if (allocate)
+			total.allocatingStores++;
+		else if (!write)
+			total.missCycles[(int)Stream::Data] += fillCycles(cache, lineAddr, Stream::Data);
 
 		if (line.valid && line.dirty)
 		{
@@ -771,6 +821,8 @@ private:
 	{
 		total.misses[(int)stream]++;
 		total.missKinds[(int)stream][(int)kind]++;
+		if (write && stream == Stream::Data)
+			total.writeMisses++;
 
 		Cache& cache = cacheFor(stream);
 		cache.stats[set].misses++;

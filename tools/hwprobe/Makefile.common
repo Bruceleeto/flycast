@@ -1,0 +1,14 @@
+# Shared build for the hardware probes. From any probe directory:
+#     source /opt/toolchains/dc/kos/environ.sh && make
+# then run it on real hardware with:
+#     dc-tool-ip -t <dreamcast-ip> -x <name>.elf
+TARGET = $(notdir $(CURDIR)).elf
+OBJS = main.o
+all: rm-elf $(TARGET)
+include $(KOS_BASE)/Makefile.rules
+clean: rm-elf
+	-rm -f $(OBJS)
+rm-elf:
+	-rm -f $(TARGET)
+$(TARGET): $(OBJS)
+	kos-cc -o $(TARGET) $(OBJS)

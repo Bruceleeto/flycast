@@ -64,6 +64,14 @@ struct BlockTrace
 	u32 pipeStalls;
 	u16 pipeByReason[(int)pipesim::StallReason::Count];
 	bool pipeModelled;	// false if any opcode had no pipeline data
+	// `pref` instructions in this block. A store queue flush is a `pref` to the
+	// SQ area, so this is an upper bound on the flushes one execution can do -
+	// the address is not known until it runs, which is why the flush itself is
+	// still counted at runtime. Dividing the block's cycles by this gives the
+	// spacing between flushes, which is what decides whether a flush stalls at
+	// all: the queue only freezes the CPU if the next flush finds it still
+	// draining. See PenaltyConfig::sqDrain*.
+	u16 prefCount;
 	u64 hash;	// hash of the guest instruction bytes: identity for JIT-resident
 			// code, whose address is not stable across runs
 };
@@ -128,7 +136,20 @@ void DYNACALL traceBlock(const BlockTrace *bt);
 // Guest data access feed, called from compiled code before each load or store.
 // `packed` is the access size in bytes with bit 8 set for a write. Only emitted
 // into blocks compiled while armed, so arming must reset the code cache.
+// `packed` is the access size in the low byte, plus flags:
+//   bit 8  - this is a write
+//   bit 9  - ALLOCATING write (movca.l). The line is allocated without reading
+//            it in, so the miss costs no line fill. It still displaces whatever
+//            was in the set, so a dirty victim is still written back, and it is
+//            still a miss. See ACCESS_WRITE / ACCESS_ALLOCATE below.
 void DYNACALL dataAccess(u32 vaddr, u32 packed);
+
+enum : u32 { ACCESS_WRITE = 0x100, ACCESS_ALLOCATE = 0x200 };
+
+// True if this guest opcode is movca.l R0,@Rn, which allocates a cache line
+// without a block read (SH4 manual 4.3.8, 10.60). Used at compile time by the
+// recompiler to set ACCESS_ALLOCATE, so nothing is decoded at runtime.
+inline bool isAllocatingStore(u16 opcode) { return (opcode & 0xF0FF) == 0x00C3; }
 // Per-instruction feed, used by the interpreter.
 void traceFetch(u32 vaddr, u32 paddr, u32 bytes);
 
@@ -158,6 +179,15 @@ const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles)
 // block-level reporting; 0 for a block that has not run recently.
 double blockExecsPerFrame(u32 id);
 double blockSqFlushesPerFrame(u32 id);
+// Store queue CYCLES per frame for a block. Not flushes times a constant: the
+// cost of a flush depends on how far apart the flushes are, which is a property
+// of the block. See sqFlushCost().
+double blockSqCyclesPerFrame(u32 id);
+
+// What one flush to `dest` costs inside `bt`. The queue drains asynchronously,
+// so a flush stalls only by however much of the drain the previous flush has
+// not finished - which is the drain time minus the gap since it started.
+double sqFlushCost(const BlockTrace& bt, SqDest dest);
 const std::deque<BlockTrace>& blocks();
 
 //
@@ -227,10 +257,17 @@ struct ProfileRow
 	// The three stall columns are what make a row actionable. High issue means
 	// the code does too much work and scheduling will not help. High flow-dep
 	// means reorder it. High icache/dcache means move it.
+	// All four are CYCLES PER FRAME and they add up:
+	//   pipeCycles == pipeIssue + pipeFlowDep + pipeResource + pipeStage
+	//                 + pipeOtherStall
+	// which is the whole point of counting stalls per cycle rather than per
+	// event. An event count cannot be added to anything.
 	double pipeCycles;		// issue + interlock, no cache cost
+	double pipeIssue;		// actually issuing instructions
 	double pipeFlowDep;		// waiting on a previous result
 	double pipeResource;	// non-parallel-executable groups colliding
 	double pipeStage;		// a stage busy or locked
+	double pipeOtherStall;	// output dependency, and knock-on from the above
 	bool pipeComplete;		// false if any block had an unmodelled opcode
 
 	bool named;

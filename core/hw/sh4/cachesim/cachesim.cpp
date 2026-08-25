@@ -92,11 +92,21 @@ struct State
 	std::vector<u64> dataWbCount;
 	std::vector<u64> dataWbAtFrame;
 	std::vector<double> dataWbPerFrame;
+	// Misses caused by a store, which cost differently and spacing-dependently.
+	std::vector<u64> dataWrMissCount;
+	std::vector<u64> dataWrMissAtFrame;
+	std::vector<double> dataWrMissPerFrame;
 	// Store queue flushes, attributed the same way: to the block that was
 	// running when the queue drained.
 	std::vector<u64> sqFlushCount;
 	std::vector<u64> sqFlushAtFrame;
 	std::vector<double> sqFlushPerFrame;
+	// Cycles, accumulated at flush time rather than derived afterwards: the
+	// cost depends on the block the flush happened in, and that is known then
+	// and cheap to look up.
+	std::vector<double> sqCycleCount;
+	std::vector<double> sqCycleAtFrame;
+	std::vector<double> sqCyclePerFrame;
 	// The block currently executing, so a data access can be charged to it. The
 	// dynarec calls traceBlock on entry, and a block runs to completion.
 	u32 currentBlock = 0xffffffff;
@@ -225,9 +235,15 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.dataWbCount.resize(size, 0);
 		st.dataWbAtFrame.resize(size, 0);
 		st.dataWbPerFrame.resize(size, 0.0);
+		st.dataWrMissCount.resize(size, 0);
+		st.dataWrMissAtFrame.resize(size, 0);
+		st.dataWrMissPerFrame.resize(size, 0.0);
 		st.sqFlushCount.resize(size, 0);
 		st.sqFlushAtFrame.resize(size, 0);
 		st.sqFlushPerFrame.resize(size, 0.0);
+		st.sqCycleCount.resize(size, 0.0);
+		st.sqCycleAtFrame.resize(size, 0.0);
+		st.sqCyclePerFrame.resize(size, 0.0);
 	}
 	st.execCount[bt->id]++;
 	// Pipeline cycles are a property of the block, so this is a multiply, not
@@ -264,13 +280,25 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 // cache implements in sh4_cache.h, deliberately: two decodes of the same
 // hardware that disagree would be a bug nobody would see.
 //
+double sqFlushCost(const BlockTrace& bt, SqDest dest)
+{
+	const PenaltyConfig& p = state().model.penalty();
+	(void)bt;	// spacing does not affect this - measured, see plan 9j
+	return dest == SqDest::Ta ? p.sqFlushTa : p.sqFlushRam;
+}
+
 void sqFlush(u32 area)
 {
 	State& st = state();
-	st.model.countSqFlush(area == 4 ? SqDest::Ta
-			: area == 3 ? SqDest::Ram : SqDest::Other);
+	const SqDest dest = area == 4 ? SqDest::Ta
+			: area == 3 ? SqDest::Ram : SqDest::Other;
+	st.model.countSqFlush(dest);
 	if (st.currentBlock < st.sqFlushCount.size())
+	{
 		st.sqFlushCount[st.currentBlock]++;
+		st.sqCycleCount[st.currentBlock] +=
+				sqFlushCost(st.blockPool[st.currentBlock], dest);
+	}
 }
 
 void DYNACALL dataAccess(u32 vaddr, u32 packed)
@@ -278,7 +306,10 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 	State& st = state();
 	Model& model = st.model;
 	const u32 size = packed & 0xff;
-	const bool write = (packed & 0x100) != 0;
+	const bool write = (packed & ACCESS_WRITE) != 0;
+	// movca.l. Only meaningful on the first line an access touches: a straddling
+	// access cannot be a movca.l, which is always one aligned longword.
+	const bool allocate = (packed & ACCESS_ALLOCATE) != 0;
 
 	model.countDataAccess();
 
@@ -311,6 +342,7 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 	const bool ora = CCN_CCR.ORA;
 	const u64 before = model.counters().misses[(int)Stream::Data];
 	const u64 wbBefore = model.counters().writebacks;
+	const u64 wmBefore = model.counters().writeMisses;
 	const double cyclesBefore = model.counters().missCycles[(int)Stream::Data];
 
 	// An access can straddle a line, and under an MMU the second line can live
@@ -324,7 +356,7 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 		// RAM mode takes half the cache out of service; those accesses are not
 		// cache accesses at all
 		if (!Model::dataIndexIsRam(index, ora))
-			model.touchData(index, pline, st.currentPc, write, copyBack);
+			model.touchData(index, pline, st.currentPc, write, copyBack, allocate);
 		if (vline == lastVline)
 			break;
 		vline += LINE_BYTES;
@@ -348,6 +380,8 @@ void DYNACALL dataAccess(u32 vaddr, u32 packed)
 		st.dataMissCount[st.currentBlock] +=
 				model.counters().misses[(int)Stream::Data] - before;
 		st.dataWbCount[st.currentBlock] += model.counters().writebacks - wbBefore;
+		st.dataWrMissCount[st.currentBlock] +=
+				model.counters().writeMisses - wmBefore;
 	}
 	chargeCycles(st, model.counters().missCycles[(int)Stream::Data] - cyclesBefore);
 }
@@ -407,17 +441,23 @@ void frameBoundary()
 		const double misses = (double)(st.missCount[i] - st.missAtFrame[i]);
 		const double dmisses = (double)(st.dataMissCount[i] - st.dataMissAtFrame[i]);
 		const double sqf = (double)(st.sqFlushCount[i] - st.sqFlushAtFrame[i]);
+		const double sqc = st.sqCycleCount[i] - st.sqCycleAtFrame[i];
 		const double wbs = (double)(st.dataWbCount[i] - st.dataWbAtFrame[i]);
+		const double wms = (double)(st.dataWrMissCount[i] - st.dataWrMissAtFrame[i]);
 		st.execAtFrame[i] = st.execCount[i];
 		st.missAtFrame[i] = st.missCount[i];
 		st.dataMissAtFrame[i] = st.dataMissCount[i];
 		st.sqFlushAtFrame[i] = st.sqFlushCount[i];
+		st.sqCycleAtFrame[i] = st.sqCycleCount[i];
 		st.dataWbAtFrame[i] = st.dataWbCount[i];
+		st.dataWrMissAtFrame[i] = st.dataWrMissCount[i];
 		st.execPerFrame[i] += alpha * (execs - st.execPerFrame[i]);
 		st.missPerFrame[i] += alpha * (misses - st.missPerFrame[i]);
 		st.dataMissPerFrame[i] += alpha * (dmisses - st.dataMissPerFrame[i]);
 		st.sqFlushPerFrame[i] += alpha * (sqf - st.sqFlushPerFrame[i]);
+		st.sqCyclePerFrame[i] += alpha * (sqc - st.sqCyclePerFrame[i]);
 		st.dataWbPerFrame[i] += alpha * (wbs - st.dataWbPerFrame[i]);
+		st.dataWrMissPerFrame[i] += alpha * (wms - st.dataWrMissPerFrame[i]);
 	}
 	st.smoothedFrameCycles += alpha * ((double)st.frameCycles - st.smoothedFrameCycles);
 
@@ -551,9 +591,15 @@ void reset()
 	std::fill(st.sqFlushCount.begin(), st.sqFlushCount.end(), 0);
 	std::fill(st.sqFlushAtFrame.begin(), st.sqFlushAtFrame.end(), 0);
 	std::fill(st.sqFlushPerFrame.begin(), st.sqFlushPerFrame.end(), 0.0);
+	std::fill(st.sqCycleCount.begin(), st.sqCycleCount.end(), 0.0);
+	std::fill(st.sqCycleAtFrame.begin(), st.sqCycleAtFrame.end(), 0.0);
+	std::fill(st.sqCyclePerFrame.begin(), st.sqCyclePerFrame.end(), 0.0);
 	std::fill(st.dataWbCount.begin(), st.dataWbCount.end(), 0);
 	std::fill(st.dataWbAtFrame.begin(), st.dataWbAtFrame.end(), 0);
 	std::fill(st.dataWbPerFrame.begin(), st.dataWbPerFrame.end(), 0.0);
+	std::fill(st.dataWrMissCount.begin(), st.dataWrMissCount.end(), 0);
+	std::fill(st.dataWrMissAtFrame.begin(), st.dataWrMissAtFrame.end(), 0);
+	std::fill(st.dataWrMissPerFrame.begin(), st.dataWrMissPerFrame.end(), 0.0);
 	st.dataTranslationFailures = 0;
 	st.chargeRemainder = 0;
 	st.chargedCycles = 0;
@@ -603,6 +649,7 @@ static void analyzeBlockPipeline(const std::vector<u8>& code, BlockTrace& bt)
 	bt.pipeStalls = 0;
 	memset(bt.pipeByReason, 0, sizeof(bt.pipeByReason));
 	bt.pipeModelled = false;
+	bt.prefCount = 0;
 	if (count == 0)
 		return;
 
@@ -631,6 +678,12 @@ static void analyzeBlockPipeline(const std::vector<u8>& code, BlockTrace& bt)
 		bt.pipeByReason[i] = (u16)std::min<u32>(0xffff,
 				b.byReason[i] > a.byReason[i] ? b.byReason[i] - a.byReason[i] : 0);
 	bt.pipeModelled = pipesim::fullyModelled(ops.data(), count);
+
+	// pref @Rn is 0000nnnn10000011. Counted here because the bytes are already
+	// in hand; nothing decodes at runtime.
+	for (u32 i = 0; i < count; i++)
+		if ((ops[i] & 0xF0FF) == 0x0083)
+			bt.prefCount++;
 }
 
 
@@ -670,6 +723,12 @@ double blockSqFlushesPerFrame(u32 id)
 {
 	const State& st = state();
 	return id < st.sqFlushPerFrame.size() ? st.sqFlushPerFrame[id] : 0.0;
+}
+
+double blockSqCyclesPerFrame(u32 id)
+{
+	const State& st = state();
+	return id < st.sqCyclePerFrame.size() ? st.sqCyclePerFrame[id] : 0.0;
 }
 
 const std::deque<BlockTrace>& blocks() { return state().blockPool; }
@@ -774,7 +833,7 @@ std::vector<ProfileRow> profile(size_t limit)
 	// Measured separately on hardware: a data fill is cheaper than an
 	// instruction fill, and a dirty eviction costs half again on top. See 9h.
 	const double cyclesPerDataMiss = st.model.penalty().dataFillCycles;
-	const double cyclesPerWriteback = st.model.penalty().writebackCycles;
+	(void)st.model.penalty().writebackCycles;	// superseded, see 9j
 
 	// Group by symbol where there is one. Everything else is generated code or
 	// a binary with no symbols, and gets grouped by the region it lives in:
@@ -808,10 +867,30 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.calls += st.execPerFrame[i];
 		row.cycles += st.execPerFrame[i] * block.guestCycles;
 		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
-		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerDataMiss
-				+ st.dataWbPerFrame[i] * cyclesPerWriteback;
+		// Read misses cost a flat fill. Write misses cost
+		//     max(floor, drain - gap)
+		// where the gap is how far apart this block's write misses are - its
+		// cycle count divided by how many it does per execution. Both measured;
+		// see plan 9j.
+		const double blockExecs = st.execPerFrame[i];
+		const double wrMiss = st.dataWrMissPerFrame[i];
+		const double rdMiss = st.dataMissPerFrame[i] > wrMiss
+				? st.dataMissPerFrame[i] - wrMiss : 0.0;
+		row.dataMissCycles += rdMiss * cyclesPerDataMiss;
+		if (wrMiss > 0.0)
+		{
+			const double perExec = blockExecs > 0.0 ? wrMiss / blockExecs : wrMiss;
+			// No block cycle count, or fewer than one write miss per execution,
+			// means they are far enough apart that the buffer keeps up.
+			const double gap = perExec >= 1.0 && block.pipeCycles > 0
+					? (double)block.pipeCycles / perExec
+					: st.model.penalty().writeMissDrain;
+			const double cost = std::max(st.model.penalty().writeMissFloor,
+					st.model.penalty().writeMissDrain - gap);
+			row.dataMissCycles += wrMiss * cost;
+		}
 		row.sqFlushes += st.sqFlushPerFrame[i];
-		row.sqCycles += st.sqFlushPerFrame[i] * st.model.penalty().sqFlushCycles;
+		row.sqCycles += st.sqCyclePerFrame[i];
 
 		// Pipeline cycles are per execution and already steady-state, so this
 		// is the same multiply the run totals use.
@@ -821,6 +900,18 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.pipeResource += execs * block.pipeByReason[(int)pipesim::StallReason::ResourceHazard];
 		row.pipeStage += execs * (block.pipeByReason[(int)pipesim::StallReason::StageFull]
 				+ block.pipeByReason[(int)pipesim::StallReason::StageLocked]);
+		// The two remaining reasons are folded in rather than given columns of
+		// their own, so the breakdown still adds up to the total exactly.
+		// OutputDep is a dependency stall - write-after-write - and the advice
+		// for it is the same as for a flow dependency, so it joins that.
+		// PrevStalled is a structural knock-on from something ahead in the
+		// pipeline, so it joins the structural column.
+		row.pipeFlowDep += execs * block.pipeByReason[(int)pipesim::StallReason::OutputDep];
+		row.pipeStage += execs * block.pipeByReason[(int)pipesim::StallReason::PrevStalled];
+		row.pipeOtherStall = 0.0;
+		// Whatever was not spent stalling was spent issuing. Derived rather
+		// than counted so the parts cannot drift from the total.
+		row.pipeIssue += execs * (block.pipeCycles - block.pipeStalls);
 		if (!block.pipeModelled)
 			row.pipeComplete = false;
 	}

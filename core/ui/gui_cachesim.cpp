@@ -74,7 +74,7 @@ static u32 lastBlockSel = 0;
 static std::vector<BlockRow> blocksIn(u32 start, u32 end)
 {
 	std::vector<BlockRow> out;
-	const double sqCost = cachesim::penaltyConfig().sqFlushCycles;
+
 	for (const cachesim::BlockTrace& b : cachesim::blocks())
 	{
 		if (b.vaddr < start || b.vaddr >= end)
@@ -82,7 +82,7 @@ static std::vector<BlockRow> blocksIn(u32 start, u32 end)
 		const double execs = cachesim::blockExecsPerFrame(b.id);
 		if (execs < 0.5)
 			continue;
-		const double sq = cachesim::blockSqFlushesPerFrame(b.id) * sqCost;
+		const double sq = cachesim::blockSqCyclesPerFrame(b.id);
 		out.push_back({ b.vaddr, b.size, execs, execs * b.pipeCycles + sq, sq,
 				b.pipeCycles,
 				b.pipeByReason[(int)pipesim::StallReason::FlowDep],
@@ -154,23 +154,11 @@ static ImVec4 heat(double pct)
 	return ImGui::GetStyle().Colors[ImGuiCol_Text];
 }
 
-// Stall columns are EVENTS, so they are shown as a share of this row's own
-// stalls. They are a breakdown of why, never an amount of time.
-static void stallCell(double part, double total)
-{
-	if (total <= 0.0)
-	{
-		ImGui::TextDisabled("-");
-		return;
-	}
-	const double pct = 100.0 * part / total;
-	ImGui::TextColored(heat(pct), "%.0f%%", pct);
-}
-
-// A share of the row's own cost, dimmed to nothing when there is none: a column
-// of "0%" reads as data, a column of "-" reads as absent, and they mean
-// different things.
-static void shareCell(double part, double total)
+// Every cost column is CYCLES PER FRAME now, and they add up to the row's
+// total. Shown as a share of the row so a wide table stays scannable, with the
+// cycle count in the tooltip - but unlike the old event counts these really are
+// time, and really do sum.
+static void cycleCell(double part, double total)
 {
 	if (part <= 0.0 || total <= 0.0)
 	{
@@ -179,6 +167,8 @@ static void shareCell(double part, double total)
 	}
 	const double pct = 100.0 * part / total;
 	ImGui::TextColored(heat(pct), "%.0f%%", pct);
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+		ImGui::SetTooltip("%.0f cycles/frame", part);
 }
 
 // One sentence saying what this row's problem actually is. The columns carry
@@ -197,10 +187,12 @@ static const char *verdict(const cachesim::ProfileRow& r, double total)
 	if (r.missCycles > total * 0.25)
 		return "Held up fetching its own code. This is a layout problem: move "
 				"functions apart so hot ones stop evicting each other.";
+	// Cycles now, and they are shares of the whole row rather than of each
+	// other, so the thresholds are against `total` directly.
 	const double ev = r.pipeFlowDep + r.pipeResource + r.pipeStage;
-	if (ev <= 0.0)
-		return "Issuing steadily with almost no stalling. To make this faster it "
-				"has to do less work - there is no waiting to reclaim.";
+	if (ev < total * 0.15)
+		return "Issuing steadily with little stalling. To make this faster it has "
+				"to do less work - there is no waiting left to reclaim.";
 	if (r.pipeFlowDep > ev * 0.5)
 		return "Mostly waiting on its own earlier results. The work is fine, the "
 				"order is not: interleave independent work between an instruction "
@@ -330,24 +322,25 @@ void drawCacheSimPanel()
 	{
 		std::string out;
 		char line[256];
-		std::snprintf(line, sizeof(line), "%-34s %9s %7s %6s %6s %6s %5s %5s\n",
-				"function", "cycles", "%frame", "flow", "res", "stage", "i$", "sq");
+		std::snprintf(line, sizeof(line),
+				"%-34s %9s %7s %8s %8s %8s %8s %7s %7s %7s\n",
+				"function", "cycles", "%frame", "issue", "flow", "res", "stage",
+				"i$", "d$", "sq");
 		out += line;
 		for (const cachesim::ProfileRow& r : rows)
 		{
 			const double t = rowTotal(r);
 			if (t < 1.0)
 				continue;
-			const double ev = r.pipeFlowDep + r.pipeResource + r.pipeStage;
+			// Cycles, not shares: pasted somewhere else these need to be
+			// comparable against another run, and percentages of different
+			// totals are not.
 			std::snprintf(line, sizeof(line),
-					"%-34s %9.0f %6.1f%% %5.0f%% %5.0f%% %5.0f%% %4.0f%% %4.0f%%\n",
+					"%-34s %9.0f %6.1f%% %8.0f %8.0f %8.0f %8.0f %7.0f %7.0f %7.0f\n",
 					r.name.c_str(), t,
 					frameCycles == 0 ? 0.0 : 100.0 * t / frameCycles,
-					ev == 0 ? 0.0 : 100.0 * r.pipeFlowDep / ev,
-					ev == 0 ? 0.0 : 100.0 * r.pipeResource / ev,
-					ev == 0 ? 0.0 : 100.0 * r.pipeStage / ev,
-					t == 0 ? 0.0 : 100.0 * r.missCycles / t,
-					t == 0 ? 0.0 : 100.0 * r.sqCycles / t);
+					r.pipeIssue, r.pipeFlowDep, r.pipeResource, r.pipeStage,
+					r.missCycles, r.dataMissCycles, r.sqCycles);
 			out += line;
 		}
 		ImGui::SetClipboardText(out.c_str());
@@ -426,14 +419,15 @@ void drawCacheSimPanel()
 		tipf("The store queue sends data out of the CPU 32 bytes at a time - "
 				"this is how vertices reach the tile accelerator.\n\n"
 				"%" PRIu64 " went to the TA, %" PRIu64 " to RAM: %.1f MB this frame.\n\n"
-				"Charged at a flat %.1f cycles each. Treat that as a rough guide: it "
-				"is a residual stall, so the true cost depends on how much other "
-				"work sits between one flush and the next. It will not predict the "
-				"effect of a change that alters that spacing.",
+				"Charged at %.1f cycles per flush to the TA and %.1f to RAM. "
+				"Measured, and flat: sweeping the gap between flushes from 16 to "
+				"205 cycles does not change it, so the queue always drains faster "
+				"than the CPU can refill it.",
 				frame.sqFlushes[(int)cachesim::SqDest::Ta],
 				frame.sqFlushes[(int)cachesim::SqDest::Ram],
 				flushes * 32.0 / (1024.0 * 1024.0),
-				cachesim::penaltyConfig().sqFlushCycles);
+				cachesim::penaltyConfig().sqFlushTa,
+				cachesim::penaltyConfig().sqFlushRam);
 	}
 
 	ImGui::Text("icache: %" PRIu64 " misses/frame, %.1f%% conflict",
@@ -511,7 +505,7 @@ void drawCacheSimPanel()
 		tableHeight -= blockHeight;
 	}
 
-	if (ImGui::BeginTable("##profile", 9,
+	if (ImGui::BeginTable("##profile", 10,
 			ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit,
 			ImVec2(0.f, tableHeight)))
 	{
@@ -519,6 +513,7 @@ void drawCacheSimPanel()
 		ImGui::TableSetupColumn("function", ImGuiTableColumnFlags_WidthStretch);
 		ImGui::TableSetupColumn("cycles", ImGuiTableColumnFlags_WidthFixed, uiScaled(46.f));
 		ImGui::TableSetupColumn("% frame", ImGuiTableColumnFlags_WidthFixed, uiScaled(50.f));
+		ImGui::TableSetupColumn("issue", ImGuiTableColumnFlags_WidthFixed, uiScaled(36.f));
 		ImGui::TableSetupColumn("flow", ImGuiTableColumnFlags_WidthFixed, uiScaled(34.f));
 		ImGui::TableSetupColumn("res", ImGuiTableColumnFlags_WidthFixed, uiScaled(34.f));
 		ImGui::TableSetupColumn("stage", ImGuiTableColumnFlags_WidthFixed, uiScaled(38.f));
@@ -545,35 +540,42 @@ void drawCacheSimPanel()
 				"the frame rate down.");
 		header(2, "This row's share of the whole frame. The bar behind the number "
 				"is the same value, so the ranking reads at a glance.");
-		header(3, "FLOW DEPENDENCY - waiting on a result that an earlier "
+		header(3, "ISSUING - actually starting instructions, as opposed to "
+				"waiting to.\n\n"
+				"This is the irreducible part: the SH4 starts at most two "
+				"instructions per cycle, so a row cannot go below half its "
+				"instruction count however well it is scheduled. If issue is "
+				"most of the row, the code is not stalling - it is simply doing "
+				"a lot, and the only way to make it faster is to do less.");
+		header(4, "FLOW DEPENDENCY - waiting on a result that an earlier "
 				"instruction has not finished producing yet.\n\n"
 				"A big number here means the amount of work is fine but the ORDER "
 				"is not. The fix is to move independent work in between an "
 				"instruction and whoever consumes its result, so the wait is spent "
 				"doing something.");
-		header(4, "RESOURCE CONFLICT - two instructions that cannot start in the "
+		header(5, "RESOURCE CONFLICT - two instructions that cannot start in the "
 				"same cycle because they need the same kind of execution unit.\n\n"
 				"The SH4 can begin two instructions per cycle, but only certain "
 				"pairs. A big number here means reaching for DIFFERENT "
 				"instructions rather than fewer of them.");
-		header(5, "STAGE BUSY - a pipeline stage was occupied or locked by a "
+		header(6, "STAGE BUSY - a pipeline stage was occupied or locked by a "
 				"long-running instruction: a divide, a square root, a matrix "
 				"transform.\n\n"
 				"A big number here means the expensive instructions are packed too "
 				"closely together. Spread them out, or find a cheaper way to get "
 				"the same answer.");
-		header(6, "INSTRUCTION CACHE - the share of this row spent fetching its "
+		header(7, "INSTRUCTION CACHE - the share of this row spent fetching its "
 				"own code into the cache before it could run.\n\n"
 				"This is a layout problem, not a code problem. The fix is moving "
 				"functions so hot ones stop evicting each other, not rewriting "
 				"them.");
-		header(7, "OPERAND CACHE - the share of this row spent waiting for DATA "
+		header(8, "OPERAND CACHE - the share of this row spent waiting for DATA "
 				"rather than for code.\n\n"
 				"High here means the access pattern is fighting the cache: walking "
 				"memory with a stride that skips whole lines, or bouncing between "
 				"addresses that land in the same cache slot. The fix is usually to "
 				"change the data layout rather than the code.");
-		header(8, "STORE QUEUE - the share of this row spent waiting for 32-byte "
+		header(9, "STORE QUEUE - the share of this row spent waiting for 32-byte "
 				"blocks to drain out to the tile accelerator or to RAM.\n\n"
 				"No amount of instruction scheduling fixes this one. It comes down "
 				"either way to sending less data - fewer vertices, or smaller "
@@ -582,18 +584,17 @@ void drawCacheSimPanel()
 				"flush, and the real cost depends on how much other work sits "
 				"between one flush and the next.");
 
-		// The three stall columns are shares of a row's own stalls, so a legend
-		// beats repeating that in three tooltips and hoping it is read.
+		// Every column is a share of the row and they sum to it. Worth saying
+		// once, above the columns, rather than in seven tooltips.
 		ImGui::TableNextRow();
 		ImGui::TableSetColumnIndex(3);
-		ImGui::TextDisabled("why it stalled, as a share of this row's stalls");
+		ImGui::TextDisabled("cycles, as a share of the row - these add up to it");
 
 		for (const cachesim::ProfileRow& row : rows)
 		{
 			const double total = rowTotal(row);
 			if (total < 1.0)
 				continue;
-			const double ev = row.pipeFlowDep + row.pipeResource + row.pipeStage;
 			ImGui::TableNextRow();
 			ImGui::TableNextColumn();
 
@@ -643,14 +644,15 @@ void drawCacheSimPanel()
 			// The three stall columns are what make a row actionable. High
 			// flow-dep means reorder it; high resource means the groups
 			// collide; high stage means a unit is busy or locked.
-			ImGui::TableNextColumn(); stallCell(row.pipeFlowDep, ev);
-			ImGui::TableNextColumn(); stallCell(row.pipeResource, ev);
-			ImGui::TableNextColumn(); stallCell(row.pipeStage, ev);
+			ImGui::TableNextColumn(); cycleCell(row.pipeIssue, total);
+			ImGui::TableNextColumn(); cycleCell(row.pipeFlowDep, total);
+			ImGui::TableNextColumn(); cycleCell(row.pipeResource, total);
+			ImGui::TableNextColumn(); cycleCell(row.pipeStage, total);
 
 			// Waiting on code, then waiting on the bus. Different fixes.
-			ImGui::TableNextColumn(); shareCell(row.missCycles, total);
-			ImGui::TableNextColumn(); shareCell(row.dataMissCycles, total);
-			ImGui::TableNextColumn(); shareCell(row.sqCycles, total);
+			ImGui::TableNextColumn(); cycleCell(row.missCycles, total);
+			ImGui::TableNextColumn(); cycleCell(row.dataMissCycles, total);
+			ImGui::TableNextColumn(); cycleCell(row.sqCycles, total);
 		}
 		ImGui::EndTable();
 	}
@@ -730,9 +732,9 @@ void drawCacheSimPanel()
 				pctCell(frameCycles == 0 ? 0.0 : 100.0 * b.cycles / frameCycles);
 				ImGui::TableNextColumn();
 				ImGui::Text("%u", b.pipeCycles);
-				ImGui::TableNextColumn(); stallCell(b.flowDep, ev);
-				ImGui::TableNextColumn(); stallCell(b.resource, ev);
-				ImGui::TableNextColumn(); stallCell(b.stage, ev);
+				ImGui::TableNextColumn(); cycleCell(b.flowDep, ev);
+				ImGui::TableNextColumn(); cycleCell(b.resource, ev);
+				ImGui::TableNextColumn(); cycleCell(b.stage, ev);
 			}
 			ImGui::EndTable();
 		}

@@ -62,6 +62,10 @@ struct Result
 {
 	u32 cycles = 0;			// total cycles for the sequence
 	u32 instructions = 0;
+	// Cycles in which something was blocked, attributed one cycle at a time to
+	// the most upstream cause. byReason sums to this exactly, and this plus
+	// issueCycles() is the total - so a breakdown can be added up, which an
+	// event count never could.
 	u32 stallCycles = 0;
 	u32 byReason[(int)StallReason::Count] = {};
 	// Set when the model failed to make progress and gave up. The cycle count
