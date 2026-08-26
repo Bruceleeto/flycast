@@ -104,6 +104,33 @@ static const dcbench_pass dcbench_passes[] = {
 	// difference in total work between two runs is real work or waiting.
 	{ { PMCR_ON_CHIP_IO_ACCESS_MODE,               "io_access" },
 	  { PMCR_BRANCH_ISSUED_MODE,                   "branch_issued" } },
+	// The operand side split by direction. A read miss must wait for the data;
+	// a write miss in copy-back mode writes into the line and lets the fill
+	// happen around it, so the two do not cost the same and a single
+	// cycles-per-miss figure is an average over whatever mix the workload
+	// happened to have. Fitting one cost to two workloads with different
+	// mixes is how you get two answers that disagree and no way to tell which
+	// is wrong.
+	{ { PMCR_OPERAND_CACHE_READ_MISS_MODE,         "ocache_read_miss" },
+	  { PMCR_OPERAND_CACHE_WRITE_MISS_MODE,        "ocache_write_miss" } },
+	// Fill cycles, which are NOT the pipeline freeze two passes up. A fill
+	// occupies the bus; a freeze is what the CPU lost waiting for it. The
+	// difference is everything the write-back buffer and the fill-around
+	// managed to hide, and it is the number that says whether the gap between
+	// cachesim's cost model and hardware is the fill itself or what surrounds
+	// it. cachesim has only one quantity here and reports it for both, so a
+	// hardware split with these two disagreeing is a finding on its own.
+	{ { PMCR_OPERAND_CACHE_FILL_MODE,              "ocache_fill_cycles" },
+	  { PMCR_INSTRUCTION_CACHE_FILL_MODE,          "icache_fill_cycles" } },
+	// Branch freeze, which pipesim does not model at all: it analyses a block
+	// as though it looped forever with no transition cost. That assumption is
+	// the leading suspect for pipesim pairing 51% of instructions where
+	// hardware pairs 26%, and this counter measures it directly instead of
+	// inferring it. Paired with the read half of the operand accesses, which
+	// gives the read/write mix the two miss counts above need as a
+	// denominator.
+	{ { PMCR_PIPELINE_FREEZE_BY_BRANCH_MODE,       "branch_stall_cycles" },
+	  { PMCR_OPERAND_READ_ACCESS_MODE,             "operand_read" } },
 };
 
 #define DCBENCH_NPASSES ((int)(sizeof(dcbench_passes) / sizeof(dcbench_passes[0])))

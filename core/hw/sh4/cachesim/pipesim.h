@@ -50,7 +50,12 @@ enum class StallReason : u8
 	StageFull,		// two instructions already occupy the next stage
 	StageLocked,	// a multi-cycle instruction holds the stage
 	ResourceHazard,	// non-parallel-executable groups want the same stage
-	FlowDep,		// read-after-write: waiting for a result
+	FlowDep,		// read-after-write on a CPU register: waiting for a result
+	FpuDep,			// read-after-write on an FPU register. Split out because
+					// hardware splits it: PMCR 0x28 counts freeze by CPU
+					// register and 0x29 freeze by FPU, and they are different
+					// sizes - 4.7% and 7.0% of a texture2d frame. One bucket
+					// cannot be checked against either.
 	OutputDep,		// write-after-write
 	PrevStalled,	// in-order issue: the instruction ahead is stalled
 	Count
@@ -68,10 +73,38 @@ struct Result
 	// event count never could.
 	u32 stallCycles = 0;
 	u32 byReason[(int)StallReason::Count] = {};
+	// Issue slots, in the sense the SH7091 performance counter means: cycles
+	// in which at least one instruction moved out of I into D. `parallelIssues`
+	// counts the ones that shared such a cycle with the instruction ahead, so
+	// issueSlots + parallelIssues is the instruction count and parallelIssues
+	// alone is the dual-issue count. Neither is derivable from cycles and
+	// stallCycles: a cycle can be charged as a stall because one sequence was
+	// blocked and still issue behind it, so `cycles - stallCycles` undercounts
+	// slots - by enough that dividing instructions by it gave 2.15 per slot on
+	// a machine that cannot exceed 2.
+	u32 issueSlots = 0;
+	u32 parallelIssues = 0;
+	// DIAGNOSTIC. Stall cycles charged to an instruction at or after pairFrom
+	// that were blamed on one BEFORE it - i.e. in the steady-state analysis of
+	// a block repeated twice, stalls in the second copy caused by the first.
+	// A block is analysed as though it looped straight into itself, and real
+	// execution enters it from somewhere else, so this is an upper bound on
+	// what that assumption invents.
+	u32 wrapStalls = 0;
+	// DIAGNOSTIC. Flow-dependency stall cycles split by how long the blamed
+	// producer sat in the decode stage: `Fast` is one cycle (it issued
+	// straight through), `Held` is longer. Since the latency clock starts at
+	// D-exit, a producer held in D pushes its result back, so `Held` is the
+	// share of the stall total that depends on the ISSUE model being right
+	// rather than on the latency rule being right.
+	u32 stallsProducerFast = 0;
+	u32 stallsProducerHeld = 0;
 	// Set when the model failed to make progress and gave up. The cycle count
 	// is then a floor, not an answer, and callers must not report it as one.
 	bool stuck = false;
 
+	// Cycles in which nothing anywhere in the pipeline was blocked. This is
+	// NOT the issue-slot count - see issueSlots above.
 	u32 issueCycles() const { return cycles - stallCycles; }
 };
 
@@ -89,7 +122,21 @@ struct InsnDetail
 
 // Analyse a straight-line sequence of `count` SH4 instructions.
 // `detail`, if non-null, must have room for `count` entries.
-Result analyze(const u16 *ops, u32 count, InsnDetail *detail = nullptr);
+//
+// `pairFrom` restricts parallelIssues to instructions at or after that index.
+// Steady-state cost is measured by analysing a block twice and looking at the
+// second copy, and dual issue cannot be recovered from that by subtraction:
+// the last instruction of copy one has nothing to pair with when copy one is
+// analysed alone and pairs with the head of copy two when it is not, so the
+// difference overcounts by roughly one per block. Counting the second copy
+// directly is exact.
+// `pcParity` is ((address of ops[0]) >> 1) & 1 - whether the first instruction
+// sits at a 4-byte boundary or halfway through one. The SH4 fetches in aligned
+// 32-bit pairs, so an instruction at 4n+2 cannot be the first of a co-issued
+// pair; it goes alone and the pairing realigns behind it. A caller that does
+// not know the address should pass 0, which is the aligned case.
+Result analyze(const u16 *ops, u32 count, InsnDetail *detail = nullptr,
+		u32 pairFrom = 0, u32 pcParity = 0);
 
 // True if every opcode in the sequence has pipeline data. An opcode with no
 // entry is charged its issue rate and no stalls, which understates it - so

@@ -1,25 +1,23 @@
-# pvr_dma, Dreamcast, KallistiOS v2.3.0 (4fdde8b2), SH4ZAM.
-# DMA scene submission, near-z clipping, PVR table fog, scripted orbit camera.
-#
-# Counter semantics, same as texture2d:
-#  * `instructions` (0x13) is issue SLOTS; the instruction count is this plus
-#    `parallel_issued` = 435438453.
-#  * `cycles` (0x23) counts only while the CPU is awake. Wall time is 3.3466s,
-#    which at 200MHz would be 669.3M; 512.6M of those were executing.
-DCBENCH begin pvr_dma passes=7 warmup=30 frames=200
+DCBENCH begin pvr_dma passes=10 warmup=30 frames=200
 DCSPG fb_r_ctrl=00800005 spg_hblank_int=03450000 spg_vblank_int=00150208 spg_control=00000100 spg_load=020c0359 spg_vblank=00240204
-DCBENCH pvr_dma frames=200 cycles=512635778 instructions=299735894 renders=200 vblanks=200 wall_ns=3346648880
-DCPHASE pvr_dma cycles camera=249711 transform=507108108 finish=5113163 rest=164796
-DCBENCH pvr_dma frames=200 icache_miss=114979 ocache_miss=5506028 renders=200 vblanks=200 wall_ns=3346638560
-DCPHASE pvr_dma icache_miss camera=2467 transform=42566 finish=68263 rest=1683
-DCBENCH pvr_dma frames=200 icache_stall_cycles=3012056 dcache_stall_cycles=127106967 renders=200 vblanks=200 wall_ns=3344135920
-DCPHASE pvr_dma icache_stall_cycles camera=111509 transform=1145451 finish=1674294 rest=80802
-DCBENCH pvr_dma frames=200 ifetch=259083342 operand_access=171338750 renders=200 vblanks=200 wall_ns=3344135760
-DCPHASE pvr_dma ifetch camera=20648 transform=257634277 finish=1392228 rest=36189
-DCBENCH pvr_dma frames=200 reg_stall_cycles=26754751 fpu_stall_cycles=50234221 renders=200 vblanks=200 wall_ns=3344135840
-DCPHASE pvr_dma reg_stall_cycles camera=4489 transform=26591544 finish=155898 rest=2820
-DCBENCH pvr_dma frames=200 parallel_issued=135702559 branch_taken=18186888 renders=200 vblanks=200 wall_ns=3344136080
-DCPHASE pvr_dma parallel_issued camera=9849 transform=135161085 finish=519445 rest=12180
-DCBENCH pvr_dma frames=200 io_access=15024 branch_issued=30049195 renders=200 vblanks=200 wall_ns=3344136080
-DCPHASE pvr_dma io_access camera=812 transform=8132 finish=5176 rest=904
+DCBENCH pvr_dma frames=200 cycles=512709514 instructions=299731792 renders=200 vblanks=200 wall_ns=3346646240
+DCPHASE pvr_dma cycles camera=244472 transform=507146480 finish=5124024 rest=194538
+DCBENCH pvr_dma frames=200 icache_miss=120022 ocache_miss=5496134 renders=200 vblanks=200 wall_ns=3346638160
+DCPHASE pvr_dma icache_miss camera=3287 transform=43553 finish=70965 rest=2217
+DCBENCH pvr_dma frames=200 icache_stall_cycles=3264052 dcache_stall_cycles=126861397 renders=200 vblanks=200 wall_ns=3344136160
+DCPHASE pvr_dma icache_stall_cycles camera=158410 transform=1248928 finish=1769807 rest=86907
+DCBENCH pvr_dma frames=200 ifetch=259092807 operand_access=171338627 renders=200 vblanks=200 wall_ns=3344135840
+DCPHASE pvr_dma ifetch camera=20496 transform=257642242 finish=1391774 rest=38295
+DCBENCH pvr_dma frames=200 reg_stall_cycles=26751814 fpu_stall_cycles=50181301 renders=200 vblanks=200 wall_ns=3344136560
+DCPHASE pvr_dma reg_stall_cycles camera=4562 transform=26589294 finish=155198 rest=2760
+DCBENCH pvr_dma frames=200 parallel_issued=135706083 branch_taken=18186899 renders=200 vblanks=200 wall_ns=3344136080
+DCPHASE pvr_dma parallel_issued camera=10050 transform=135163737 finish=519837 rest=12459
+DCBENCH pvr_dma frames=200 io_access=15022 branch_issued=30048912 renders=200 vblanks=200 wall_ns=3344136800
+DCPHASE pvr_dma io_access camera=816 transform=7934 finish=5392 rest=880
+DCBENCH pvr_dma frames=200 ocache_read_miss=4600547 ocache_write_miss=895572 renders=200 vblanks=200 wall_ns=3346638400
+DCPHASE pvr_dma ocache_read_miss camera=1443 transform=4568956 finish=28906 rest=1242
+DCBENCH pvr_dma frames=200 ocache_fill_cycles=114057434 icache_fill_cycles=2043674 renders=200 vblanks=200 wall_ns=3346638160
+DCPHASE pvr_dma ocache_fill_cycles camera=30082 transform=113377056 finish=625780 rest=24516
+DCBENCH pvr_dma frames=200 branch_stall_cycles=13679189 operand_read=113029562 renders=200 vblanks=200 wall_ns=3344135600
+DCPHASE pvr_dma branch_stall_cycles camera=1349 transform=13531023 finish=142018 rest=4799
 DCBENCH end pvr_dma

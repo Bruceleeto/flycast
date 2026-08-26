@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <climits>
 #include "pipesim.h"
 #include "pipesim_optable.h"
@@ -311,6 +312,28 @@ static u64 resolveSyms(u32 syms, u16 op)
 	return rv;
 }
 
+// Which register file a dependency is on. fr0-fr15 plus the FPU's own control
+// and transfer registers; xmtrx is the bank the matrix instructions read, so a
+// wait on it is an FPU wait too. Everything else - r0-r15, the banked set, the
+// control registers, macl/mach, T - is the CPU side.
+// Every FP-side register as a mask, for table 8.3 note 8.
+static u64 fpuRegMask()
+{
+	static u64 m = 0;
+	if (m == 0)
+		for (int r = 0; r < 64; r++)
+			if ((r >= REG_FR0 && r < REG_FR0 + 16)
+					|| r == REG_FPUL || r == REG_FPSCR || r == REG_XMTRX)
+				m |= 1ull << r;
+	return m;
+}
+
+static bool isFpuReg(int r)
+{
+	return (r >= REG_FR0 && r < REG_FR0 + 16)
+			|| r == REG_FPUL || r == REG_FPSCR || r == REG_XMTRX;
+}
+
 // ---------------------------------------------------------------------------
 // Opcode lookup. Linear over 212 entries, memoised into a 64K table on first
 // use - the same shape as flycast's own OpDesc.
@@ -353,6 +376,15 @@ struct OpCorrection
 static const OpCorrection opCorrections[] = {
 	{ 0xF0FF, 0xF06D, 11, 37 },	// fsqrt FRn
 	{ 0xF0FF, 0xF03D,  4, 36 },	// ftrc FRm,FPUL
+	// Single-precision arithmetic is latency 3 in table 8.3; flycast's table
+	// carries 4. Measured, not just read: `validation/fpustall` case C is four
+	// chained fadds at distance 1, and hardware charges 6 stall cycles per
+	// group of four - two per dependency, which is latency minus distance with
+	// latency 3. At 4 the model charged three per dependency.
+	{ 0xF00F, 0xF000,  3, 36 },	// fadd FRm,FRn
+	{ 0xF00F, 0xF001,  3, 36 },	// fsub FRm,FRn
+	{ 0xF00F, 0xF002,  3, 36 },	// fmul FRm,FRn
+	{ 0xF00F, 0xF00E,  3, 36 },	// fmac FR0,FRm,FRn
 	// FSRRA and FSCA are Sega-private single-precision instructions. They are
 	// absent from table 8.3 of the program manual entirely - the strings do not
 	// appear in it - and the only Renesas documents that describe them are
@@ -407,6 +439,7 @@ const char *stallReasonName(StallReason r)
 	case StallReason::StageLocked:    return "stage-locked";
 	case StallReason::ResourceHazard: return "resource";
 	case StallReason::FlowDep:        return "flow-dep";
+	case StallReason::FpuDep:         return "fpu-dep";
 	case StallReason::OutputDep:      return "output-dep";
 	case StallReason::PrevStalled:    return "prev-stalled";
 	default:                          return "?";
@@ -480,9 +513,24 @@ struct Insn
 	u8 bgFrom;
 	int programOrder;
 	u64 reads, writes;
+	// Cycle this instruction entered the decode stage, and how long it sat
+	// there. Diagnostic: the latency clock starts at D-EXIT, so any error in
+	// how long the issue model holds an instruction in D propagates into every
+	// dependent instruction's stall. Splitting stalls by the producer's D
+	// residency says whether that coupling is where the over-stall comes from.
+	int dEnter;
+	// The cycle from which this instruction's result may be consumed.
+	//
+	// SHC_PM 8.3 defines latency as the interval between issue and GENERATION
+	// of the result, not its write-back, and figure 8.3 (e) shows a consumer
+	// reading a register two cycles before the producer reaches S. The SH4
+	// forwards. So availability is set when the producer issues, from its
+	// latency, and has nothing to do with where its execution pattern ends.
+	int availCycle;
 };
 
-Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
+Result analyze(const u16 *ops, u32 count, InsnDetail *detail, u32 pairFrom,
+		u32 pcParity)
 {
 	buildOpInfoCache();
 
@@ -664,9 +712,23 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 		return -1;
 	};
 
-	auto providedByOther = [&](u64 regs, const Seq &s) -> int {
+	// `reg`, if given, receives the register that was actually waited on, so
+	// the caller can tell a CPU-register stall from an FPU one the way the
+	// hardware counters do.
+	auto providedByOther = [&](u64 regs, const Seq &s, int *reg = nullptr) -> int {
 		if (regs == 0)
 			return -1;
+		// The operand that arrives LAST is the one holding this instruction up,
+		// so that is the one the stall is blamed on. Returning the first match
+		// in register-number order instead put the blame on whichever register
+		// happened to be numbered lowest, and the numbering is not neutral:
+		// r0-r15 are bits 0-15 and fr0-fr15 are 16-31, so every stall waiting
+		// on both a GPR and an FPU register was charged to the GPR. Hardware
+		// splits its two freeze counters 40/60 CPU-to-FPU on texture2d; this
+		// model split them 76/24 the other way, which is the same instructions
+		// being misfiled rather than a different number of them.
+		int worstSteps = -1;
+		int worst = -1;
 		for (int r = 0; r < 64; r++)
 		{
 			if ((regs & (1ull << r)) == 0)
@@ -674,12 +736,65 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 			for (int id : provides[r])
 			{
 				const Seq &p = pool[id];
-				if (p.insnIdx != s.insnIdx && p.programOrder < s.programOrder)
-					return p.insnIdx;
+				if (p.insnIdx == s.insnIdx || p.programOrder >= s.programOrder)
+					continue;
+				// Forwarded already: the result exists even though the producer
+				// has not reached write-back. Holding on until it did was
+				// charging the whole tail of the producer's execution pattern -
+				// both common patterns put S at D+3, so that is 2 extra cycles
+				// on every EX-group dependency and 1 on every load-use, against
+				// correct stalls that are usually 0 or 1.
+				if ((int)cycle >= insns[p.insnIdx].availCycle)
+					continue;
+				// Rank by when the value ARRIVES, not by how far the producer
+				// still is from write-back. Those stopped agreeing when
+				// availability moved onto availCycle above: ranking by
+				// steps-to-write-back could name a register that has already
+				// been forwarded while a different operand was the real
+				// blocker, and when the misnamed one was a GPR the stall was
+				// filed as a CPU-register freeze instead of an FPU one.
+				const int avail = insns[p.insnIdx].availCycle;
+				if (avail > worstSteps)
+				{
+					worstSteps = avail;
+					worst = p.insnIdx;
+					if (reg != nullptr)
+						*reg = r;
+				}
 			}
 		}
-		return -1;
+		return worst;
 	};
+
+	// Per-cycle trace. PIPESIM_TRACE=<count> prints the first 40 cycles of the
+	// first sequence analysed with that many instructions: which stage each
+	// in-flight sequence is in, and which of them stalled and why. The
+	// per-instruction dump says how much; this says when.
+	const char *traceEnv = getenv("PIPESIM_TRACE");
+	static int traced = 0;
+	// PIPESIM_SKIP skips that many matching blocks first - several unrelated
+	// blocks can share an instruction count, and the first one is rarely the
+	// one being investigated.
+	// PIPESIM_TRACE_OP selects by the block's FIRST OPCODE instead, in hex.
+	// Instruction count is a poor selector - unrelated blocks share one, and
+	// which of them the analyser reaches first depends on what the guest did.
+	const char *opEnv = getenv("PIPESIM_TRACE_OP");
+	bool want = false;
+	if (opEnv != nullptr)
+		want = count > 0 && ops[0] == (u16)strtoul(opEnv, nullptr, 16);
+	else if (traceEnv != nullptr)
+		want = count == (u32)atoi(traceEnv);
+	const char *skipEnv = getenv("PIPESIM_SKIP");
+	const bool trace = want
+			&& traced++ == (skipEnv != nullptr ? atoi(skipEnv) : 0);
+
+	if (trace)
+	{
+		fprintf(stderr, "PIPESIM trace count=%u ops:", count);
+		for (u32 i = 0; i < count && i < 6; i++)
+			fprintf(stderr, " %04x", ops[i]);
+		fprintf(stderr, "\n");
+	}
 
 	while (cycle < MAX_CYCLES)
 	{
@@ -688,6 +803,10 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 
 		int prevStall = -1;
 		bool anyAdvanced = false;
+		// Instructions that left I for D this cycle. At most two: the fetch
+		// stage never holds more than that.
+		int issuedThisCycle = 0;
+		int issuedIdx[2] = { -1, -1 };
 		// Per-CYCLE attribution. Several pipeline sequences can be blocked in
 		// the same cycle, so counting each one gives events, not time - and a
 		// breakdown in events cannot be added to anything.
@@ -700,6 +819,7 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 		// list happens to be in.
 		StallReason cycleReason = StallReason::None;
 		int cycleReasonInsn = INT_MAX;
+		int cycleReasonBlame = -1;
 		toRemove.clear();
 		toResult.clear();
 
@@ -734,6 +854,43 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 
 			StallReason reason = StallReason::None;
 			int blame = -1;
+			int waitedOn = -1;
+			// True if something already issued in this cycle produces a value
+			// this instruction reads, with a latency of at least one cycle.
+			// Table 8.3 note 8 adds one case with no register in common: a
+			// bank switch followed by an LS instruction touching the FP file.
+			// The T bit reaching a branch is not a flow dependency the issue
+			// stage can see. `validation/fpustall` case A settles it: its loop
+			// is 24 fmovs, which are all LS x LS and cannot pair, plus `dt r1`
+			// and `bf` - so dt/bf is the ONLY legal pair in the iteration.
+			// Hardware reports 6226 parallel issues over 6000 iterations and a
+			// reg_stall of TWO. It pairs them, and charges nothing.
+			//
+			// So the branch condition forwards to the branch unit with an
+			// effective latency of zero, and whatever the transfer costs is
+			// filed under PMCR 0x27 (branch) rather than 0x28 (CPU register).
+			// This replaces the old special case here, which broke the pair -
+			// that got the stall count right by accident and the issue slots
+			// wrong by 6000 an iteration.
+			const u64 depMask = seq.group == BR ? ~(1ull << REG_T) : ~0ull;
+			auto dependentOnIssuedThisCycle = [&]() {
+				for (int k = 0; k < issuedThisCycle && k < 2; k++)
+				{
+					const int p = issuedIdx[k];
+					if (p < 0)
+						continue;
+					const u16 pop = ops[p];
+					if ((pop == 0xF3FD || pop == 0xFBFD) && seq.group == LS
+							&& ((seq.reads | seq.writes) & fpuRegMask()) != 0)
+						return true;
+					const OpInfo *pi = insns[p].info;
+					if (pi == nullptr || pi->latency == 0)
+						continue;
+					if ((insns[p].writes & seq.reads & depMask) != 0)
+						return true;
+				}
+				return false;
+			};
 
 			if (seq.background)
 			{
@@ -766,20 +923,132 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 				// Note: the reference simulator does not set its stall flag
 				// here, so this does not propagate to following instructions.
 				// Replicated deliberately - see docs/cachesim/pipesim_notes.md.
-				reason = StallReason::StageLocked;
+				//
+				// A lock on one of the FPU stages is an FPU freeze, not a
+				// generic stage conflict. `validation/fpustall` case B settles
+				// this: an fdiv followed by fadds on completely disjoint
+				// registers - no dependency of any kind - puts 563983 cycles
+				// into PMCR 0x29. So 0x29 is not "waiting on an FP register",
+				// it is that OR waiting on an FPU resource, and filing these
+				// under StageLocked was the other half of why the FPU bucket
+				// read low and the CPU-register one read high.
+				reason = (nextStage >= ST_F0 && nextStage <= ST_F3)
+						? StallReason::FpuDep : StallReason::StageLocked;
 				blame = pool[stageLock[nextStage]].insnIdx;
+				// An FPU stage lock DOES propagate, unlike the integer case
+				// above. The SH4 issues in order with no scoreboarding past D,
+				// so when an FE instruction cannot enter its stage everything
+				// behind it waits too. `validation/fpustall` case C is four
+				// chained fadds: hardware charges exactly 9 stall cycles per
+				// group, which is three dependent pairs at three cycles each
+				// and therefore ZERO overlap between one group and the next.
+				// Without this the next group started issuing during the
+				// stall and the model charged 7.5.
+				if (nextStage >= ST_F0 && nextStage <= ST_F3)
+					seq.stall = true;
 			}
-			else if (nextStage != ST_D && !allParallel)
+			else if (!allParallel)
 			{
-				reason = StallReason::ResourceHazard;
+				// Two FE-group instructions contending for the FPU pipeline is
+				// an FPU freeze, which is what hardware calls it - 0x29 is a
+				// superset of FP-register waits and FPU resource waits, per
+				// `validation/fpustall` case B. Leaving it as a generic
+				// resource hazard lost the cycles entirely, because nothing
+				// maps ResourceHazard to a hardware counter.
+				//
+				// This branch fires BEFORE the flow-dependency check below, so
+				// it also swallows genuine FE-to-FE data dependencies: table
+				// 8.2 bars FE x FE from dual issue, so a dependent pair trips
+				// the parallelism test before anything looks at the registers.
+				// A schedule dump of `fpustall` case C - four chained fadds -
+				// showed 47 of its 48 stalls filed as `resource` and one as
+				// `fpu-dep`.
+				const bool fpuPair = seq.group == FE && hazard >= 0
+						&& insns[hazard].info != nullptr
+						&& insns[hazard].info->unit == FE;
+				reason = fpuPair ? StallReason::FpuDep
+						: StallReason::ResourceHazard;
 				blame = hazard;
+				seq.stall = true;
+			}
+			else if (curStage == ST_I && nextStage == ST_D && issuedThisCycle == 1
+					&& issuedIdx[0] >= 0
+					&& (((u32)issuedIdx[0] + pcParity) & 1) != 0)
+			{
+				// The instruction already issued this cycle sits at a 4n+2
+				// address, so it is the SECOND half of an aligned fetch pair
+				// and there is nothing left in that pair to go with it. This
+				// instruction waits for the next slot.
+				//
+				// pipesim used to pair any two adjacent legally-pairable
+				// instructions regardless of where they sat, which pairs more
+				// often than the fetch unit can supply.
+				reason = StallReason::ResourceHazard;
+				seq.stall = true;
+			}
+			else if (curStage == ST_I && nextStage == ST_D && issuedThisCycle > 0
+					&& dependentOnIssuedThisCycle())
+			{
+				// A parallel-executable pair is BROKEN when the second
+				// instruction reads something the first writes with a latency
+				// of one cycle or more. The two are fetched together and issue
+				// in successive cycles instead.
+				//
+				// Figure 8.3(e)-2 states it: "ADD and MOV.L are not executed
+				// in parallel, since MOV.L references the result of ADD as its
+				// destination address", and the stage diagram shows MOV.L's I
+				// stage extended by one so its D lands a cycle late. Figure
+				// 8.3(b) is titled "parallel-executable and no dependency" -
+				// the qualifier is load-bearing. Table 8.3 note 8 is the same
+				// principle applied to a bank switch.
+				//
+				// Latency ZERO still pairs, which is why the test is on
+				// latency and not on the dependency alone. Figure 8.3(e)-1
+				// shows MOV R0,R1 / ADD R2,R1 co-issued at identical stage
+				// cycles with a true dependency on R1: "ADD is not stalled
+				// when executed after an instruction with zero-cycle latency,
+				// even if there is dependency." So MOV Rm,Rn, FMOV FRm,FRn,
+				// FLDI0/1, FABS, FNEG, FLDS and FSTS keep pairing with their
+				// consumers and everything else does not.
+				//
+				// This subsumes the conditional-branch case that used to be
+				// special-cased here: CMP/EQ is MT with latency 1, BT/BF is
+				// BR, MT x BR is a legal pairing in table 8.2, so the pair
+				// breaks, the distance becomes 1 and the stall is
+				// max(0, 1 - 1) = 0.
+				//
+				// The total cycle count is the same either way, which is why
+				// this hid behind four other hypotheses. Consumer EX lands at
+				// producer D + latency + 1 whether you co-issue and charge
+				// `latency`, or break the pair and charge `latency - 1`. Only
+				// the ATTRIBUTION differs - and the attribution is what the
+				// hardware counters measure.
+				//
+				// This is not a stall, and it costs no cycle: something else
+				// issued this cycle, so the accounting below does not charge a
+				// freeze. It moves the branch from this issue slot to the next
+				// one, which is exactly what hardware does.
+				//
+				// `validation/blockentry` measures it. Its loop scaffolding is
+				// `dt r1` then `bf`, and hardware spends one extra issue slot
+				// per iteration and ZERO register stalls, where pipesim paired
+				// the two and charged dt's latency of 1 as a flow dependency.
+				// The cycle count is the same either way, which is why this
+				// hid for so long - but the split is not, and the same pattern
+				// is every loop and every `if` in compiled code. All three
+				// broken counters were this one thing: on texture2d the issue
+				// slot deficit (30.2M), the parallel-issue excess (29.2M) and
+				// the register stall excess (27.9M) all sit on top of a
+				// branch_issued of 25.8M.
+				reason = StallReason::ResourceHazard;
 				seq.stall = true;
 			}
 			else if ((curStage != ST_I || (seq.reads != 0 && insns[seq.insnIdx].info != nullptr
 						&& insns[seq.insnIdx].info->latency == 0))
-					&& (blame = providedByOther(seq.reads, seq)) >= 0)
+					&& (blame = providedByOther(seq.reads & depMask, seq, &waitedOn)) >= 0)
 			{
-				reason = StallReason::FlowDep;
+				reason = isFpuReg(waitedOn) ? StallReason::FpuDep
+						: StallReason::FlowDep;
 				seq.stall = true;
 			}
 			else if (curStage != ST_I
@@ -803,6 +1072,34 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 			{
 				anyAdvanced = true;
 				seq.stall = false;
+				if (curStage == ST_D)
+				{
+					// The latency clock starts when an instruction LEAVES the
+					// decode stage, not when it enters. That is the cycle the
+					// functional unit actually begins work; an instruction
+					// held in D by a hazard has not started computing anything.
+					//
+					// The two are the same for an instruction that never
+					// stalls, which is why every isolated probe agreed and
+					// only dependent CHAINS diverged. In `fpustall` case C -
+					// four chained fadds - starting the clock at D-entry made
+					// the second dependency in each group free: the producer
+					// entered D at c2, stalled there until c6, and the model
+					// had its result ready at c7 while the consumer was only
+					// able to issue at c6. Hardware charges three cycles for
+					// that dependency like the others, 9 per group against the
+					// model's 6.
+					const OpInfo *oi = insns[seq.insnIdx].info;
+					insns[seq.insnIdx].availCycle =
+							(int)cycle + (oi != nullptr ? oi->latency : 0);
+				}
+				if (curStage == ST_I && nextStage == ST_D)
+				{
+					insns[seq.insnIdx].dEnter = (int)cycle;
+					if (issuedThisCycle < 2)
+						issuedIdx[issuedThisCycle] = seq.insnIdx;
+					issuedThisCycle++;
+				}
 				if (seq.locks())
 					stageLock[seq.stage()] = -1;
 				seq.step++;
@@ -857,6 +1154,7 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 				{
 					cycleReason = reason;
 					cycleReasonInsn = seq.insnIdx;
+					cycleReasonBlame = blame;
 				}
 				const int i = seq.insnIdx;
 				stallOf[i]++;
@@ -871,11 +1169,40 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 				prevStall = id;
 		}
 
+		// A producer stops being a hazard when its RESULT EXISTS, which SHC_PM
+		// 8.3 puts at (issue + latency) - not when its sequence happens to
+		// reach the step flagged F_RESULT in the execution pattern.
+		//
+		// Those two are the same for integer ops and wildly different for FPU
+		// ones, whose patterns flag the result early while the latency runs on
+		// for several more cycles. Removing on F_RESULT dropped a producer from
+		// `provides` before anything could see it, so a chain of dependent
+		// fadds never stalled at all: a trace of `fpustall` case C showed
+		// seventeen dependent FE instructions issuing back to back, one per
+		// cycle, with the flow-dependency check finding nothing to wait for
+		// because the thing to wait for had already been deleted.
+		//
+		// So removal is keyed on availCycle and nothing else. providedByOther
+		// skips producers that have already delivered, which makes the two
+		// mechanisms one mechanism instead of two that disagree.
+		// A pattern that explicitly marks F_RESULT is stating where that
+		// opcode's result is generated, and for some opcodes that is the only
+		// place it can be stated: MAC.L has four different latencies, one per
+		// destination, and the single latency field cannot carry them, so the
+		// early one - the address write-back a chain of MACs actually depends
+		// on - lives in the pattern. mul.l is the same story, its result at F2
+		// rather than FS.
+		//
+		// So a producer stops being a hazard at whichever comes first: the
+		// step its pattern flags, or availCycle. Patterns only flag it where
+		// it has been deliberately established; the ones that do not - fadd
+		// and friends - fall through to availCycle, which is what fixed the
+		// dependent FE chains.
 		for (int id : toResult)
 		{
-			const Seq &s = pool[id];
+			const Seq &sq = pool[id];
 			for (int r = 0; r < 64; r++)
-				if (s.writes & (1ull << r))
+				if (sq.writes & (1ull << r))
 				{
 					auto &v = provides[r];
 					for (size_t k = 0; k < v.size(); k++)
@@ -885,6 +1212,18 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 							break;
 						}
 				}
+		}
+		for (int r = 0; r < 64; r++)
+		{
+			auto &v = provides[r];
+			for (size_t k = 0; k < v.size(); )
+			{
+				const int idx = pool[v[k]].insnIdx;
+				if ((int)cycle >= insns[idx].availCycle)
+					v.erase(v.begin() + k);
+				else
+					k++;
+			}
 		}
 
 		for (int id : toRemove)
@@ -917,6 +1256,8 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 			const u32 i = pc++;
 			Insn &in = insns[i];
 			in.programOrder = programOrder;
+			in.availCycle = INT_MAX;	// until it issues
+			in.dEnter = -1;
 
 			for (int s = 0; s < in.nseq; s++)
 			{
@@ -958,12 +1299,65 @@ Result analyze(const u16 *ops, u32 count, InsnDetail *detail)
 						provides[r].push_back(resultSeq);
 		}
 
-		// One cycle, one entry. byReason now sums to stallCycles exactly, and
-		// stallCycles + issueCycles() == cycles.
-		if (cycleReason != StallReason::None)
+		if (trace && cycle < 40)
+		{
+			fprintf(stderr, "c%-3u issued=%d ", cycle, issuedThisCycle);
+			for (int id : inFlight)
+			{
+				const Seq &q = pool[id];
+				static const char *SN[] = {"I","D","EX","SX","F0","F1","F2","F3",
+						"?","?","?","?"};
+				fprintf(stderr, "[i%d:%s%s]", q.insnIdx,
+						q.stage() >= 0 && q.stage() < 8 ? SN[q.stage()] : "?",
+						q.stall ? "*" : "");
+			}
+			fprintf(stderr, "  reason=%s insn=%d\n",
+					stallReasonName(cycleReason),
+					cycleReasonInsn == INT_MAX ? -1 : cycleReasonInsn);
+		}
+
+		if (issuedThisCycle > 0)
+			res.issueSlots++;
+		// Credit the pair to the YOUNGER of the two, so pairFrom selects on the
+		// instruction that did the pairing-up rather than on the one it caught.
+		if (issuedThisCycle == 2
+				&& (u32)std::max(issuedIdx[0], issuedIdx[1]) >= pairFrom)
+			res.parallelIssues++;
+
+		// One cycle, one entry, and only when the cycle issued NOTHING.
+		//
+		// A cycle in which the oldest sequence is blocked but something behind
+		// it issues anyway is not a freeze - the machine made progress in it.
+		// Charging those was costing 2.9x: hardware's freeze counters plus its
+		// issue-slot counter add up to its cycle count (1.024 on texture2d,
+		// 1.015 on pvr_dma, the excess being cycles where two freeze reasons
+		// overlap and both counters tick), which they could not do if a freeze
+		// cycle could also be an issue cycle.
+		//
+		// This also makes stallCycles + issueSlots == cycles here, which is a
+		// stronger identity than the old stallCycles + issueCycles() == cycles
+		// and is the one hardware satisfies.
+		if (cycleReason != StallReason::None && issuedThisCycle == 0)
 		{
 			res.stallCycles++;
 			res.byReason[(int)cycleReason]++;
+			if (cycleReasonBlame >= 0
+					&& (cycleReason == StallReason::FlowDep
+						|| cycleReason == StallReason::FpuDep))
+			{
+				const Insn &pr = insns[cycleReasonBlame];
+				const int resid = pr.availCycle == INT_MAX || pr.dEnter < 0
+						? 0
+						: (pr.availCycle - (pr.info != nullptr ? pr.info->latency : 0))
+							- pr.dEnter;
+				if (resid <= 1)
+					res.stallsProducerFast++;
+				else
+					res.stallsProducerHeld++;
+			}
+			if ((u32)cycleReasonInsn >= pairFrom && cycleReasonBlame >= 0
+					&& (u32)cycleReasonBlame < pairFrom)
+				res.wrapStalls++;
 		}
 
 		if (!anyAdvanced && pc == count)

@@ -1,0 +1,14 @@
+BLOCKENTRY begin reps=4000
+BLOCKENTRY LONG issue_slots=152016 parallel_issued=144001
+BLOCKENTRY LONG cycles=156138 branch_taken=3999
+BLOCKENTRY LONG branch_stall=4025 reg_stall=67
+BLOCKENTRY BLK16 issue_slots=152016 parallel_issued=144001
+BLOCKENTRY BLK16 cycles=172184 branch_taken=19999
+BLOCKENTRY BLK16 branch_stall=19999 reg_stall=1
+BLOCKENTRY BLK8 issue_slots=168016 parallel_issued=160001
+BLOCKENTRY BLK8 cycles=204055 branch_taken=35999
+BLOCKENTRY BLK8 branch_stall=36236 reg_stall=206
+BLOCKENTRY BLK4 issue_slots=200863 parallel_issued=192237
+BLOCKENTRY BLK4 cycles=269864 branch_taken=68031
+BLOCKENTRY BLK4 branch_stall=67999 reg_stall=1
+BLOCKENTRY end

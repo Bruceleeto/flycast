@@ -1,0 +1,23 @@
+DCBENCH begin sqmark passes=10 warmup=30 frames=200
+DCSPG fb_r_ctrl=00800005 spg_hblank_int=03450000 spg_vblank_int=00150208 spg_control=00000100 spg_load=020c0359 spg_vblank=00240204
+DCBENCH sqmark frames=200 cycles=617057533 instructions=408453833 renders=200 vblanks=200 wall_ns=3344182080
+DCPHASE sqmark cycles burst=75418044 med=154018043 slow=384214367 rest=3407079
+DCBENCH sqmark frames=200 icache_miss=45525 ocache_miss=16033 renders=200 vblanks=200 wall_ns=3346675040
+DCPHASE sqmark icache_miss burst=4465 med=3284 slow=2784 rest=34992
+DCBENCH sqmark frames=200 icache_stall_cycles=1234602 dcache_stall_cycles=10643161 renders=200 vblanks=200 wall_ns=3346670560
+DCPHASE sqmark icache_stall_cycles burst=148676 med=87945 slow=67730 rest=930251
+DCBENCH sqmark frames=200 ifetch=396678056 operand_access=95429676 renders=200 vblanks=200 wall_ns=3346669360
+DCPHASE sqmark ifetch burst=47929867 med=101923180 slow=245817154 rest=1007855
+DCBENCH sqmark frames=200 reg_stall_cycles=73350554 fpu_stall_cycles=51733059 renders=200 vblanks=200 wall_ns=3344168000
+DCPHASE sqmark reg_stall_cycles burst=8415989 med=18012770 slow=46813418 rest=108377
+DCBENCH sqmark frames=200 parallel_issued=130375466 branch_taken=60942204 renders=200 vblanks=200 wall_ns=3344171440
+DCPHASE sqmark parallel_issued burst=26570636 med=37364682 slow=66132269 rest=307879
+DCBENCH sqmark frames=200 io_access=14047 branch_issued=68495868 renders=200 vblanks=200 wall_ns=3344176960
+DCPHASE sqmark io_access burst=1707 med=2848 slow=5232 rest=4260
+DCBENCH sqmark frames=200 ocache_read_miss=15539 ocache_write_miss=503 renders=200 vblanks=200 wall_ns=3344177760
+DCPHASE sqmark ocache_read_miss burst=2042 med=720 slow=979 rest=11798
+DCBENCH sqmark frames=200 ocache_fill_cycles=344652 icache_fill_cycles=840382 renders=200 vblanks=200 wall_ns=3346675280
+DCPHASE sqmark ocache_fill_cycles burst=49300 med=15768 slow=20932 rest=258652
+DCBENCH sqmark frames=200 branch_stall_cycles=9395091 operand_read=84344701 renders=200 vblanks=200 wall_ns=3346675200
+DCPHASE sqmark branch_stall_cycles burst=2307414 med=3506240 slow=3492599 rest=88838
+DCBENCH end sqmark

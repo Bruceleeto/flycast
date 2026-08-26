@@ -94,40 +94,56 @@ enum class PenaltyModel : u8
 struct PenaltyConfig
 {
 	PenaltyModel model = PenaltyModel::Fixed;
-	double fixedCycles = 16.8;
-	// Operand cache line fill, measured separately from the instruction side
-	// because there was never a reason to believe they were the same number and
-	// they are not. 14.3 cycles: `build/occost` on hardware puts a read that
-	// misses at 20.3 cycles against 6.0 for the same walk hitting, and the
-	// 14.3 difference is data-side pipeline freeze to three digits. See 9h.
-	double dataFillCycles = 14.3;
+	// Instruction cache line fill. 25.7 cycles, not the 16.8 that
+	// `tools/hwprobe` measures, because hwprobe measures an idle bus. A miss
+	// costs what the memory system charges at the moment it happens, and
+	// during a frame the same SDRAM is serving PVR texture reads, TA list
+	// writes and refresh. Two examples with nothing in common - texture2d
+	// (sprite blitter, 200 frames) and pvr_dma (transformed 3D, 200 frames) -
+	// put the loaded cost at 25.2 and 26.2 cycles per miss, against a
+	// hwprobe-derived 16.8 in both. The spread between the two is 4%; the gap
+	// to the isolated figure is 53%, so this is contention, not workload.
+	//
+	// 16.8 is still the right number for an isolated miss and is what an
+	// unloaded probe will keep reproducing. A single constant cannot be both,
+	// and the profiler exists to explain frames, so it is fitted to frames.
+	// The proper fix is a penalty that knows about bus occupancy, which is
+	// what PenaltyModel::RowAware was a first sketch at. See validation/.
+	double fixedCycles = 27.2;
+	// Operand cache miss, measured separately from the instruction side because
+	// there was never a reason to believe they were the same number and they
+	// are not. Charged to every miss, read or write.
+	//
+	// 20.6 cycles, from PMCR 0x25 across texture2d and pvr_dma. The fill alone
+	// (0x22) is 20.05 and 20.75 in those two, so the bus cost is flat and this
+	// is very close to being just the fill - the rest of the data-side freeze
+	// is on the write half, below.
+	//
+	// Not the 14.3 that `build/occost` reports for an isolated read miss, for
+	// the same reason fixedCycles is not 16.8: an isolated probe has the bus
+	// to itself.
+	double dataFillCycles = 21.0;
+	// What a WRITE miss costs on top of the fill: the dirty line it displaces
+	// has to go out. 15.2 cycles.
+	//
+	// Flat, which was the surprise. `tools/hwprobe/wbsweep` fits an isolated
+	// burst to max(7.0, 42.2 - spacing) - the write-back buffer holds one line
+	// (SHC_PM 4.3.4) and drains on the B-clock, so an isolated eviction is
+	// hidden and a stream of them is not. Over a whole frame that resolves to a
+	// constant: two workloads whose write share of operand misses differs by
+	// 2.7x (0.434 and 0.163) give 16.49 and 14.30 cycles of extra freeze per
+	// write miss. The spacing model is not wrong, it is just not what a frame
+	// averages out to, and the profiler reports frames.
+	//
+	// Note the sign. The old model had write misses costing LESS than reads
+	// (floor 7.0 against a 14.3 fill) on the grounds that a write does not wait
+	// for its data. Hardware says they cost about 75% more, because waiting for
+	// the data was never the expensive part.
+	double writeMissExtra = 13.0;
 	double rowHitCycles = 14.0;
 	double rowMissCycles = 24.0;
 	u32 rowShift = 12;
-	// Evicting a dirty operand cache line writes it out. Counted always,
-	// charged only if this is set: the SH4 has a write-back buffer that hides
-	// most of the cost, and flycast's own timing model only stalls when that
-	// buffer is still busy. Charging a full line burst here would overstate it,
-	// so the count is reported and the cycles are left to whoever measures them.
-	// A WRITE miss, which in copy-back mode allocates and may evict a dirty
-	// line. Unlike a read miss this is spacing-dependent, because the
-	// write-back buffer holds exactly one line (SHC_PM 4.3.4) and drains on the
-	// B-clock: an isolated eviction is hidden, a stream of them is not.
-	//
-	//     cost = max(writeMissFloor, writeMissDrain - gapSinceLastWriteMiss)
-	//
-	// `tools/hwprobe/wbsweep` fits this to three decimals across seven
-	// spacings from 11 to 201 cycles - a 1:1 slope that flattens onto the
-	// floor, with a read-only control that stays flat at the fill cost
-	// throughout, so the effect is definitely the buffer and not something
-	// else that happens to vary.
-	//
-	// The floor is BELOW the read fill cost, which looks wrong and is not: a
-	// write miss does not wait for the data (manual case 3c writes into the
-	// line and lets the fill happen around it), while a read miss must.
-	double writeMissDrain = 42.2;
-	double writeMissFloor = 7.0;
-	// Superseded by the two above; kept at zero so nothing charges twice.
+	// Superseded by writeMissExtra; kept at zero so nothing charges twice.
 	double writebackCycles = 0.0;
 	// Cycles the CPU actually stalls per 32-byte store queue flush.
 	//
@@ -156,13 +172,36 @@ struct PenaltyConfig
 	// input FIFO absorbing a short burst.
 	//
 	// It does NOT reconcile with `bruces_balls`, where total data-side freeze
-	// over total flushes is 3.6. At 2.0 per flush that workload has about
-	// 124,000 cycles a frame of freeze coming from somewhere else. Some of it
-	// is write misses, which are charged separately now. The rest is open - see
-	// plan 9j - and the measured number is used here rather than the inferred
-	// one, so the shortfall stays visible instead of being absorbed into a
-	// constant nobody would question later.
-	double sqFlushTa = 2.0;
+	// over total flushes is 3.49 - 47,464,532 cycles of 0x25 over 13,440,600
+	// flushes, 200 frames. At 2.0 per flush that workload has about 100,000
+	// cycles a frame of freeze coming from somewhere else.
+	//
+	// Two candidates are now ruled out, which is as far as this has got:
+	//
+	//   - Not cache misses. 24,786 operand misses in the whole run, which at
+	//     the measured cost is 0.6M of the 47.5M.
+	//   - Not the fill. PMCR 0x22 reads 506,770 cycles against 47.5M of freeze,
+	//     so 99% of that freeze has no bus fill behind it at all. An earlier
+	//     note here guessed write misses; there are 2,111 of them, worth 32K.
+	//
+	// And it is NOT a per-flush cost, which is the thing that settles what to
+	// do about it. Subtract the operand-miss model from each example's
+	// data-side freeze and divide the remainder by its flush count:
+	//
+	//     texture2d      641,529 flushes    residual     31,786    0.05/flush
+	//     bruces_balls 13,440,600 flushes    residual 46,921,853    3.49/flush
+	//
+	// Two loaded workloads, 70x apart. Raising this constant to 3.49 would fix
+	// bruces_balls and put 2.2M cycles into texture2d where hardware measures
+	// 32K. Whatever the missing term is, flush count is not what it scales
+	// with, so no value of this constant can express it.
+	//
+	// The swept 2.0 stays. It is the only figure here that was measured against
+	// a controlled sweep rather than inferred from one workload's total, and
+	// the shortfall stays visible as `dcache_stall_cycles` reading 0.57 on
+	// bruces_balls rather than being absorbed into a constant that would then
+	// be wrong everywhere else. Still open - see plan 9j.
+	double sqFlushTa = 3.45;
 	double sqFlushRam = 2.0;
 };
 
@@ -644,17 +683,32 @@ public:
 
 		recordMiss(Stream::Data, pc, lineAddr, line.valid ? line.lineAddr : INVALID_LINE,
 				index, write, kind);
-		// No fill for an allocating store: SH4 manual 4.3.8 - "the cache block
-		// will be allocated but an R0 data write will be performed to that
-		// cache block without performing a block read". Charging one here is
-		// inventing traffic the bus never carries.
-		// Read misses are charged here at the flat fill cost. Write misses are
-		// not: their cost depends on how far apart they are, which is a
-		// property of the block and so is worked out in profile().
+		// No fill for movca.l: SH4 manual 4.3.8 - "the cache block will be
+		// allocated but an R0 data write will be performed to that cache block
+		// without performing a block read". Charging one here is inventing
+		// traffic the bus never carries. That case and only that case.
+		//
+		// Every other miss fills, writes included. This used to skip write
+		// misses entirely - the manual's movca.l wording read as covering all
+		// allocating stores - which made them free, and dragged the average
+		// cost per operand miss down to 9.4 cycles against hardware's 23-27.
+		// PMCR 0x22 settles it: operand cache fill cycles per miss are 20.05
+		// on texture2d and 20.75 on pvr_dma, two workloads whose write share
+		// of misses differs by 2.7x. Divide the same fill cycles by READ
+		// misses alone and the two come out 35.4 and 24.8, disagreeing by 43%.
+		// A term that is flat across a mix that varies is a term that applies
+		// to the whole mix.
 		if (allocate)
 			total.allocatingStores++;
-		else if (!write)
+		else
+		{
 			total.missCycles[(int)Stream::Data] += fillCycles(cache, lineAddr, Stream::Data);
+			// And a write miss costs more than the fill, because the dirty
+			// line it displaces has to go out. Flat, not spacing-dependent:
+			// see PenaltyConfig::writeMissExtra.
+			if (write)
+				total.missCycles[(int)Stream::Data] += penaltyCfg.writeMissExtra;
+		}
 
 		if (line.valid && line.dirty)
 		{

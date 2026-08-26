@@ -1,0 +1,24 @@
+# Written by validate.py. Compare with hardware.txt.
+DCBENCH begin bruces_balls passes=10 warmup=30 frames=200
+DCSPG fb_r_ctrl=00800005 spg_hblank_int=031d0000 spg_vblank_int=00150208 spg_control=00000100 spg_load=020c0359 spg_vblank=00240204
+DCBENCH bruces_balls frames=200 cycles=391743184 instructions=313833227 renders=200 vblanks=200 wall_ns=3346384640
+DCPHASE bruces_balls cycles transform=388885040 finish=478912 rest=2379232
+DCBENCH bruces_balls frames=200 icache_miss=55220 ocache_miss=11362 renders=200 vblanks=200 wall_ns=3343880240
+DCPHASE bruces_balls icache_miss transform=16918 finish=7660 rest=30642
+DCBENCH bruces_balls frames=200 icache_stall_cycles=1502038 dcache_stall_cycles=46629508 renders=200 vblanks=200 wall_ns=3343882400
+DCPHASE bruces_balls icache_stall_cycles transform=459741 finish=208814 rest=833483
+DCBENCH bruces_balls frames=200 ifetch=244734046 operand_access=102919027 renders=200 vblanks=200 wall_ns=3343883120
+DCPHASE bruces_balls ifetch transform=243918735 finish=135600 rest=679711
+DCBENCH bruces_balls frames=200 reg_stall_cycles=20043554 fpu_stall_cycles=214033808 renders=200 vblanks=200 wall_ns=3343881120
+DCPHASE bruces_balls reg_stall_cycles transform=19826424 finish=41752 rest=175378
+DCBENCH bruces_balls frames=200 parallel_issued=161183590 branch_taken=0 renders=200 vblanks=200 wall_ns=3343882240
+DCPHASE bruces_balls parallel_issued transform=160813044 finish=54000 rest=316546
+DCBENCH bruces_balls frames=200 io_access=0 branch_issued=0 renders=200 vblanks=200 wall_ns=3346382240
+DCPHASE bruces_balls io_access transform=0 finish=0 rest=0
+DCBENCH bruces_balls frames=200 ocache_read_miss=9758 ocache_write_miss=1603 renders=200 vblanks=200 wall_ns=3346383440
+DCPHASE bruces_balls ocache_read_miss transform=5236 finish=203 rest=4319
+DCBENCH bruces_balls frames=200 ocache_fill_cycles=259383 icache_fill_cycles=1501875 renders=200 vblanks=200 wall_ns=3343878880
+DCPHASE bruces_balls ocache_fill_cycles transform=136817 finish=4559 rest=118007
+DCBENCH bruces_balls frames=200 branch_stall_cycles=0 operand_read=0 renders=200 vblanks=200 wall_ns=3343878000
+DCPHASE bruces_balls branch_stall_cycles transform=0 finish=0 rest=0
+DCBENCH end bruces_balls

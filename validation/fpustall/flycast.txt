@@ -1,0 +1,19 @@
+# Written by validate.py. Compare with hardware.txt.
+FPUSTALL begin reps=6000 unroll=12
+FPUSTALL A_fmov_dep reg_stall=1 fpu_stall=72000
+FPUSTALL A_fmov_dep cycles=185920 issue_slots=150017
+FPUSTALL A_fmov_dep icache_stall=55 branch_stall=0
+FPUSTALL A_fmov_dep dcache_stall=0 parallel_issued=6003
+FPUSTALL B_fdiv_lock reg_stall=1 fpu_stall=569999
+FPUSTALL B_fdiv_lock cycles=294336 issue_slots=294015
+FPUSTALL B_fdiv_lock icache_stall=109 branch_stall=0
+FPUSTALL B_fdiv_lock dcache_stall=194 parallel_issued=7635
+FPUSTALL C_fadd_dep reg_stall=1 fpu_stall=432000
+FPUSTALL C_fadd_dep cycles=294336 issue_slots=294015
+FPUSTALL C_fadd_dep icache_stall=871 branch_stall=0
+FPUSTALL C_fadd_dep dcache_stall=0 parallel_issued=6003
+FPUSTALL D_int_dep reg_stall=72001 fpu_stall=0
+FPUSTALL D_int_dep cycles=188608 issue_slots=150726
+FPUSTALL D_int_dep icache_stall=27 branch_stall=0
+FPUSTALL D_int_dep dcache_stall=0 parallel_issued=6003
+FPUSTALL end

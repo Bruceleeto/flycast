@@ -1,17 +1,24 @@
 # Written by validate.py. Compare with hardware.txt.
-DCBENCH begin pvr_dma passes=7 warmup=30 frames=200
-DCBENCH pvr_dma frames=200 cycles=422256804 instructions=208060723 renders=200 vblanks=200 wall_ns=3343870720
-DCPHASE pvr_dma cycles camera=89600 transform=418882240 finish=3269284 rest=15680
-DCBENCH pvr_dma frames=200 icache_miss=77169 ocache_miss=5317588 renders=200 vblanks=200 wall_ns=3343867520
-DCPHASE pvr_dma icache_miss camera=2768 transform=30889 finish=42110 rest=1402
-DCBENCH pvr_dma frames=200 icache_stall_cycles=1298253 dcache_stall_cycles=61650531 renders=200 vblanks=200 wall_ns=3343867440
-DCPHASE pvr_dma icache_stall_cycles camera=46491 transform=523617 finish=704600 rest=23545
-DCBENCH pvr_dma frames=200 ifetch=228533075 operand_access=154668528 renders=200 vblanks=200 wall_ns=3343869760
-DCPHASE pvr_dma ifetch camera=22515 transform=227377856 finish=1123099 rest=9605
-DCBENCH pvr_dma frames=200 reg_stall_cycles=119619923 fpu_stall_cycles=0 renders=200 vblanks=200 wall_ns=3346369840
-DCPHASE pvr_dma reg_stall_cycles camera=12247 transform=119032641 finish=570636 rest=4399
-DCBENCH pvr_dma frames=200 parallel_issued=225166933 branch_taken=0 renders=200 vblanks=200 wall_ns=3346372160
-DCPHASE pvr_dma parallel_issued camera=22308 transform=224056015 finish=1079405 rest=9205
-DCBENCH pvr_dma frames=200 io_access=0 branch_issued=0 renders=200 vblanks=200 wall_ns=3343865200
+DCBENCH begin pvr_dma passes=10 warmup=30 frames=200
+DCSPG fb_r_ctrl=00800005 spg_hblank_int=031d0000 spg_vblank_int=00150208 spg_control=00000100 spg_load=020c0359 spg_vblank=00240204
+DCBENCH pvr_dma frames=200 cycles=484473464 instructions=298746361 renders=200 vblanks=200 wall_ns=3343869280
+DCPHASE pvr_dma cycles camera=103936 transform=480403840 finish=3883704 rest=81984
+DCBENCH pvr_dma frames=200 icache_miss=77738 ocache_miss=5453283 renders=200 vblanks=200 wall_ns=3343866000
+DCPHASE pvr_dma icache_miss camera=2767 transform=32124 finish=41445 rest=1402
+DCBENCH pvr_dma frames=200 icache_stall_cycles=2114229 dcache_stall_cycles=123194901 renders=200 vblanks=200 wall_ns=3343865920
+DCPHASE pvr_dma icache_stall_cycles camera=75285 transform=871409 finish=1129402 rest=38133
+DCBENCH pvr_dma frames=200 ifetch=228533012 operand_access=154668608 renders=200 vblanks=200 wall_ns=3343866000
+DCPHASE pvr_dma ifetch camera=22515 transform=227386004 finish=1114888 rest=9605
+DCBENCH pvr_dma frames=200 reg_stall_cycles=37448834 fpu_stall_cycles=42333009 renders=200 vblanks=200 wall_ns=3343866000
+DCPHASE pvr_dma reg_stall_cycles camera=5023 transform=37172406 finish=269206 rest=2199
+DCBENCH pvr_dma frames=200 parallel_issued=134569649 branch_taken=0 renders=200 vblanks=200 wall_ns=3346370640
+DCPHASE pvr_dma parallel_issued camera=9653 transform=133932209 finish=622587 rest=5200
+DCBENCH pvr_dma frames=200 io_access=0 branch_issued=0 renders=200 vblanks=200 wall_ns=3346368320
 DCPHASE pvr_dma io_access camera=0 transform=0 finish=0 rest=0
+DCBENCH pvr_dma frames=200 ocache_read_miss=4370903 ocache_write_miss=1082257 renders=200 vblanks=200 wall_ns=3343866000
+DCPHASE pvr_dma ocache_read_miss camera=2 transform=4353283 finish=17417 rest=201
+DCBENCH pvr_dma frames=200 ocache_fill_cycles=123192467 icache_fill_cycles=2111780 renders=200 vblanks=200 wall_ns=3343868160
+DCPHASE pvr_dma ocache_fill_cycles camera=13812 transform=122654887 finish=519547 rest=4221
+DCBENCH pvr_dma frames=200 branch_stall_cycles=0 operand_read=0 renders=200 vblanks=200 wall_ns=3343870480
+DCPHASE pvr_dma branch_stall_cycles camera=0 transform=0 finish=0 rest=0
 DCBENCH end pvr_dma

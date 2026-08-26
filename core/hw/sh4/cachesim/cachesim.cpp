@@ -54,6 +54,9 @@ struct State
 	// contain no cache cost, and the two are not added together anywhere.
 	u64 pipeCyclesTotal = 0;
 	u64 pipeStallsTotal = 0;
+	u64 pipeIssueSlotsTotal = 0;
+	u64 pipeWrapStallsTotal = 0;
+	u64 pipeParallelTotal = 0;
 	u64 pipeByReason[(int)pipesim::StallReason::Count] = {};
 	u64 pipeUnmodelledBlocks = 0;
 	// Block entries. Every translated block ends in a control transfer, so this
@@ -254,6 +257,9 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 	// a measurement: no per-instruction work on the hot path.
 	st.pipeCyclesTotal += bt->pipeCycles;
 	st.pipeStallsTotal += bt->pipeStalls;
+	st.pipeIssueSlotsTotal += bt->pipeIssueSlots;
+	st.pipeWrapStallsTotal += bt->pipeWrapStalls;
+	st.pipeParallelTotal += bt->pipeParallel;
 	for (int i = 0; i < (int)pipesim::StallReason::Count; i++)
 		st.pipeByReason[i] += bt->pipeByReason[i];
 	if (!bt->pipeModelled)
@@ -297,12 +303,20 @@ void sqFlush(u32 area)
 	const SqDest dest = area == 4 ? SqDest::Ta
 			: area == 3 ? SqDest::Ram : SqDest::Other;
 	st.model.countSqFlush(dest);
+	double cost = 0.0;
 	if (st.currentBlock < st.sqFlushCount.size())
 	{
 		st.sqFlushCount[st.currentBlock]++;
-		st.sqCycleCount[st.currentBlock] +=
-				sqFlushCost(st.blockPool[st.currentBlock], dest);
+		cost = sqFlushCost(st.blockPool[st.currentBlock], dest);
+		st.sqCycleCount[st.currentBlock] += cost;
 	}
+	// Charged to the guest clock, not just counted. This was the whole of
+	// bruces_balls reading 0.579 on total cycles: it spends 47M cycles per 200
+	// frames stalled on the store queue and every one of them was reported in
+	// the profile and then not paid for. A guest that submits geometry through
+	// the store queues runs measurably faster under the emulator than on the
+	// machine, and the profiler said so while the timing did not.
+	chargeCycles(st, cost);
 }
 
 void DYNACALL dataAccess(u32 vaddr, u32 packed)
@@ -570,6 +584,9 @@ void reset()
 	st.totalCycles = 0;
 	st.pipeCyclesTotal = 0;
 	st.pipeStallsTotal = 0;
+	st.pipeIssueSlotsTotal = 0;
+	st.pipeWrapStallsTotal = 0;
+	st.pipeParallelTotal = 0;
 	memset(st.pipeByReason, 0, sizeof(st.pipeByReason));
 	st.pipeUnmodelledBlocks = 0;
 	st.blockExecTotal = 0;
@@ -652,6 +669,9 @@ static void analyzeBlockPipeline(const std::vector<u8>& code, BlockTrace& bt)
 	const u32 count = (u32)(code.size() / 2);
 	bt.pipeCycles = 0;
 	bt.pipeStalls = 0;
+	bt.pipeIssueSlots = 0;
+	bt.pipeParallel = 0;
+	bt.pipeWrapStalls = 0;
 	memset(bt.pipeByReason, 0, sizeof(bt.pipeByReason));
 	bt.pipeModelled = false;
 	bt.prefCount = 0;
@@ -672,17 +692,84 @@ static void analyzeBlockPipeline(const std::vector<u8>& code, BlockTrace& bt)
 	std::vector<u16> twice = ops;
 	twice.insert(twice.end(), ops.begin(), ops.end());
 
-	pipesim::Result a = pipesim::analyze(once.data(), (u32)once.size());
-	pipesim::Result b = pipesim::analyze(twice.data(), (u32)twice.size());
+	// Instruction alignment matters to dual issue, so the block's address goes
+	// in. `twice` starts at the same parity as `once`, and the second copy's
+	// parity follows from its index, which is what the analyser wants anyway.
+	const u32 parity = (bt.vaddr >> 1) & 1;
+	pipesim::Result a = pipesim::analyze(once.data(), (u32)once.size(),
+			nullptr, 0, parity);
+	// pairFrom = count: dual issues are counted over the SECOND copy only.
+	pipesim::Result b = pipesim::analyze(twice.data(), (u32)twice.size(),
+			nullptr, count, parity);
 	if (a.stuck || b.stuck || b.cycles < a.cycles)
 		return;
 
 	bt.pipeCycles = b.cycles - a.cycles;
 	bt.pipeStalls = b.stallCycles > a.stallCycles ? b.stallCycles - a.stallCycles : 0;
+	// Dual issues in the steady state, then slots as the remainder. Taking each
+	// as a b-a difference let the two drift apart: the tail of the first copy
+	// has nothing to pair with when the block is analysed alone and pairs with
+	// the head of the second copy when it is not, so the difference overcounts
+	// by about one per block execution - enough to report more parallel issues
+	// than issue slots, which a two-issue machine cannot do. b counts the
+	// second copy directly, and the instruction count makes the other half of
+	// the partition an identity rather than a second measurement.
+	bt.pipeParallel = std::min(b.parallelIssues, count);
+	bt.pipeWrapStalls = (u16)std::min<u32>(0xffff, b.wrapStalls);
+	bt.pipeIssueSlots = count - bt.pipeParallel;
 	for (int i = 0; i < (int)pipesim::StallReason::Count; i++)
 		bt.pipeByReason[i] = (u16)std::min<u32>(0xffff,
 				b.byReason[i] > a.byReason[i] ? b.byReason[i] - a.byReason[i] : 0);
 	bt.pipeModelled = pipesim::fullyModelled(ops.data(), count);
+
+	// Schedule dump. Set PIPESIM_DUMP to a block size and the per-instruction
+	// stall detail for the second copy of a block that size is printed once.
+	// This is how you answer "the totals are wrong, which instruction is it" -
+	// nothing else in here shows the schedule, only sums over it.
+	if (getenv("PIPESIM_RESID"))
+	{
+		static u64 fast = 0, held = 0, blocks = 0;
+		fast += (u64)b.stallsProducerFast * 1;
+		held += (u64)b.stallsProducerHeld * 1;
+		if (++blocks % 500 == 0 || blocks < 5)
+			fprintf(stderr, "PIPESIM resid blocks=%llu fast=%llu held=%llu "
+					"held_share=%.3f\n", (unsigned long long)blocks,
+					(unsigned long long)fast, (unsigned long long)held,
+					(fast + held) ? (double)held / (double)(fast + held) : 0.0);
+	}
+	// PIPESIM_DUMP_AT=<hex vaddr> selects the block by ADDRESS instead of by
+	// size. Size is a poor selector once a workload has more than a handful of
+	// blocks - several unrelated ones share an instruction count, and the
+	// profile names the block that matters by address, so this is the selector
+	// that matches how the block was found in the first place.
+	// PIPESIM_BLOCKS=1 lists every block as it is analysed, so the address to
+	// hand PIPESIM_DUMP_AT can be read off rather than guessed from a symbol -
+	// the profile groups blocks by SYMBOL, so the address it prints is the
+	// function's, which is usually not any block's start.
+	if (getenv("PIPESIM_BLOCKS"))
+		fprintf(stderr, "PIPESIM blk %08x count=%u cycles=%u stalls=%u flow=%u\n",
+				bt.vaddr, count, bt.pipeCycles, bt.pipeStalls,
+				bt.pipeByReason[(int)pipesim::StallReason::FlowDep]);
+	const char *dumpAt = getenv("PIPESIM_DUMP_AT");
+	if (const char *want = dumpAt != nullptr ? dumpAt : getenv("PIPESIM_DUMP"))
+	{
+		static u32 dumped = 0;
+		const bool hit = dumpAt != nullptr
+				? bt.vaddr == (u32)strtoul(want, nullptr, 16)
+				: count == (u32)atoi(want);
+		if (hit && dumped++ == 0)
+		{
+			std::vector<pipesim::InsnDetail> det(twice.size());
+			pipesim::analyze(twice.data(), (u32)twice.size(), det.data(), count);
+			fprintf(stderr, "PIPESIM block %08x count=%u cycles=%u stalls=%u\n",
+					bt.vaddr, count, bt.pipeCycles, bt.pipeStalls);
+			for (u32 i = count; i < twice.size(); i++)
+				fprintf(stderr, "  [%3u] op=%04x stall=%-3u %-12s blame=%d\n",
+						i - count, det[i].op, det[i].stallCycles,
+						pipesim::stallReasonName(det[i].reason),
+						det[i].blamedBy == 0xff ? -1 : (int)det[i].blamedBy - (int)count);
+		}
+	}
 
 	// pref @Rn is 0000nnnn10000011. Counted here because the bytes are already
 	// in hand; nothing decodes at runtime.
@@ -744,6 +831,9 @@ PipeTotals pipeTotals()
 	PipeTotals t{};
 	t.cycles = st.pipeCyclesTotal;
 	t.stalls = st.pipeStallsTotal;
+	t.issueSlots = st.pipeIssueSlotsTotal;
+	t.wrapStalls = st.pipeWrapStallsTotal;
+	t.parallelIssues = st.pipeParallelTotal;
 	for (int i = 0; i < (int)pipesim::StallReason::Count; i++)
 		t.byReason[i] = st.pipeByReason[i];
 	t.unmodelledBlockExecs = st.pipeUnmodelledBlocks;
@@ -837,7 +927,7 @@ std::vector<ProfileRow> profile(size_t limit)
 	const State& st = state();
 	const double cyclesPerMiss = st.model.penalty().fixedCycles;
 	// Measured separately on hardware: a data fill is cheaper than an
-	// instruction fill, and a dirty eviction costs half again on top. See 9h.
+	// instruction miss, and a dirty eviction costs three quarters again on top.
 	const double cyclesPerDataMiss = st.model.penalty().dataFillCycles;
 	(void)st.model.penalty().writebackCycles;	// superseded, see 9j
 
@@ -873,28 +963,14 @@ std::vector<ProfileRow> profile(size_t limit)
 		row.calls += st.execPerFrame[i];
 		row.cycles += st.execPerFrame[i] * block.guestCycles;
 		row.missCycles += st.missPerFrame[i] * cyclesPerMiss;
-		// Read misses cost a flat fill. Write misses cost
-		//     max(floor, drain - gap)
-		// where the gap is how far apart this block's write misses are - its
-		// cycle count divided by how many it does per execution. Both measured;
-		// see plan 9j.
-		const double blockExecs = st.execPerFrame[i];
+		// Every operand miss costs the fill; a write miss costs the write-back
+		// on top. The same two terms the run totals use, so a per-symbol
+		// breakdown adds up to the whole-run figure - which the previous
+		// spacing-dependent write model did not, because the totals charged
+		// write misses nothing at all.
 		const double wrMiss = st.dataWrMissPerFrame[i];
-		const double rdMiss = st.dataMissPerFrame[i] > wrMiss
-				? st.dataMissPerFrame[i] - wrMiss : 0.0;
-		row.dataMissCycles += rdMiss * cyclesPerDataMiss;
-		if (wrMiss > 0.0)
-		{
-			const double perExec = blockExecs > 0.0 ? wrMiss / blockExecs : wrMiss;
-			// No block cycle count, or fewer than one write miss per execution,
-			// means they are far enough apart that the buffer keeps up.
-			const double gap = perExec >= 1.0 && block.pipeCycles > 0
-					? (double)block.pipeCycles / perExec
-					: st.model.penalty().writeMissDrain;
-			const double cost = std::max(st.model.penalty().writeMissFloor,
-					st.model.penalty().writeMissDrain - gap);
-			row.dataMissCycles += wrMiss * cost;
-		}
+		row.dataMissCycles += st.dataMissPerFrame[i] * cyclesPerDataMiss
+				+ wrMiss * st.model.penalty().writeMissExtra;
 		row.sqFlushes += st.sqFlushPerFrame[i];
 		row.sqCycles += st.sqCyclePerFrame[i];
 
@@ -902,7 +978,12 @@ std::vector<ProfileRow> profile(size_t limit)
 		// is the same multiply the run totals use.
 		const double execs = st.execPerFrame[i];
 		row.pipeCycles += execs * block.pipeCycles;
-		row.pipeFlowDep += execs * block.pipeByReason[(int)pipesim::StallReason::FlowDep];
+		// FPU waits are a flow dependency too, so they belong in this column;
+		// they are also tracked on their own because hardware counts them
+		// separately and they are the larger half.
+		row.pipeFlowDep += execs * (block.pipeByReason[(int)pipesim::StallReason::FlowDep]
+				+ block.pipeByReason[(int)pipesim::StallReason::FpuDep]);
+		row.pipeFpuDep += execs * block.pipeByReason[(int)pipesim::StallReason::FpuDep];
 		row.pipeResource += execs * block.pipeByReason[(int)pipesim::StallReason::ResourceHazard];
 		row.pipeStage += execs * (block.pipeByReason[(int)pipesim::StallReason::StageFull]
 				+ block.pipeByReason[(int)pipesim::StallReason::StageLocked]);

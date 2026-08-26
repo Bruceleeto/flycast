@@ -39,26 +39,77 @@ TOLERANCE = {
 	"dcache_stall_cycles": (0.30, "soft"),
 	"reg_stall_cycles":    (0.50, "soft"),
 	"fpu_stall_cycles":    (0.50, "soft"),
+	# The operand side split by direction. Counts are held as tight as the
+	# combined figure; the cost of each is what is being fitted, so it starts
+	# as a trend.
+	"ocache_read_miss":    (0.25, "hard"),
+	"ocache_write_miss":   (0.25, "hard"),
+	"ocache_fill_cycles":  (0.30, "soft"),
+	"icache_fill_cycles":  (0.30, "soft"),
+	# Not modelled by flycast at all - hardware-only, kept visible so the
+	# figures the model needs are in the capture rather than in a note.
+	"branch_stall_cycles": (0.50, "soft"),
+	"operand_read":        (0.50, "soft"),
+	# Probe counter names. The probes predate the DCBENCH harness and print
+	# their own, shorter names. Held HARD and tight: a probe is a controlled
+	# case with a known answer, so there is no "trend" to allow for - if one of
+	# these drifts, the model got the case wrong.
+	"issue_slots":         (0.05, "hard"),
+	"parallel_issued.p":   (0.10, "hard"),
+	"cycles.p":            (0.05, "hard"),
+	"reg_stall":           (0.05, "hard"),
+	"fpu_stall":           (0.05, "hard"),
+	"icache_stall":        (0.50, "soft"),
+	"dcache_stall":        (0.50, "soft"),
+	"branch_stall":        (0.50, "soft"),
+	"branch_taken.p":      (0.05, "soft"),
 }
 
+def tolerance_for(key):
+	"""Probe counters arrive namespaced as `<case>.<counter>`. A few names are
+	shared with the DCBENCH set but mean something different in a probe, so
+	those carry a `.p` suffix in the table above."""
+	if "." not in key:
+		return TOLERANCE.get(key)
+	suffix = key.split(".", 1)[1]
+	return TOLERANCE.get(suffix + ".p") or TOLERANCE.get(suffix)
+
 LINE = re.compile(r"^DCBENCH \S+ frames=(\d+) (.*)$")
+# Probes print their own tag and one line per case, e.g.
+#     FPUSTALL A_fmov_dep reg_stall=2 fpu_stall=72000
+#     BLOCKENTRY LONG cycles=156138 branch_taken=3999
+# Counters are namespaced by case, so a probe with four cases produces four
+# independent comparisons rather than one meaningless sum.
+PROBE = re.compile(r"^([A-Z][A-Z0-9]{2,}) ([A-Za-z][A-Za-z0-9_]*) ((?:\S+=\S+\s*)+)$")
+NOT_PROBE = {"DCBENCH", "DCPHASE", "DCSPG"}
+
+def _pairs(out, blob, prefix=""):
+	for pair in blob.split():
+		if "=" not in pair:
+			continue
+		k, v = pair.split("=", 1)
+		try:
+			out[prefix + k] = int(v)
+		except ValueError:
+			pass
 
 def parse(text):
-	"""DCBENCH lines -> {counter: value}. Pass structure does not matter here:
-	every counter is named, so which pass produced it is the guest's business."""
+	"""Counter lines -> {counter: value}. Handles both the DCBENCH harness and
+	the standalone probes, which predate it and print their own format.
+
+	Pass structure does not matter for DCBENCH: every counter is named, so which
+	pass produced it is the guest's business. Probe counters ARE namespaced by
+	case, because the whole point of a probe is that its cases differ."""
 	out = {}
 	for line in text.splitlines():
-		m = LINE.match(line.strip())
-		if not m:
+		line = line.strip()
+		m = LINE.match(line)
+		if m:
+			_pairs(out, m.group(2))
 			continue
-		for pair in m.group(2).split():
-			if "=" not in pair:
-				continue
-			k, v = pair.split("=", 1)
-			try:
-				out[k] = int(v)
-			except ValueError:
-				pass
+		m = PROBE.match(line)
+		if m and m.group(1) not in NOT_PROBE:
+			_pairs(out, m.group(3), m.group(2) + ".")
 	return out
 
 def run_flycast(elf, extra):
@@ -79,13 +130,20 @@ def run_flycast(elf, extra):
 			stderr=subprocess.STDOUT, text=True, bufsize=1)
 	lines = []
 	try:
+		# Stop on the end marker of WHICHEVER harness the guest is running.
+		# This used to test for "DCBENCH end" only, so a probe - which prints
+		# its own tag - never matched and the loop ran until the caller's
+		# timeout killed it. That is why a probe appeared to take minutes: it
+		# had finished in seconds and nothing was watching for it to say so.
+		end = re.compile(r"^([A-Z][A-Z0-9]{2,}) end\b")
 		for line in proc.stdout:
 			line = line.rstrip("\n")
-			if line.startswith("DCBENCH") or line.startswith("DCPHASE"):
-				print("  " + line, flush=True)
-				lines.append(line)
-				if line.startswith("DCBENCH end"):
-					break
+			if not line[:1].isupper() or not line.split(" ", 1)[0].isupper():
+				continue
+			print("  " + line, flush=True)
+			lines.append(line)
+			if end.match(line):
+				break
 	finally:
 		proc.terminate()
 		try:
@@ -99,9 +157,15 @@ def report(name, hw, fc):
 	print(f"  {'counter':<22}{'hardware':>14}{'flycast':>14}{'ratio':>9}  ")
 	worst = []
 	failed = 0
-	for key in TOLERANCE:
-		if key not in hw:
-			continue
+	compared = 0
+	# Iterate over what hardware measured, in the table's order where it has an
+	# opinion and the capture's order otherwise. Iterating over TOLERANCE alone
+	# silently ignored every probe counter, because probe counters are
+	# namespaced by case and so never matched a bare table key - which is how
+	# `fpustall` came to compare NOTHING and report "all within tolerance".
+	keys = [k for k in TOLERANCE if k in hw]
+	keys += [k for k in hw if k not in TOLERANCE and tolerance_for(k)]
+	for key in keys:
 		h = hw[key]
 		f = fc.get(key)
 		if f is None:
@@ -113,7 +177,8 @@ def report(name, hw, fc):
 			print(f"  {key:<22}{h:>14}{f:>14}{'-':>9}  {mark}")
 			continue
 		ratio = f / h
-		tol, kind = TOLERANCE[key]
+		compared += 1
+		tol, kind = tolerance_for(key)
 		off = abs(ratio - 1.0)
 		if off <= tol:
 			mark = "ok"
@@ -133,6 +198,8 @@ def report(name, hw, fc):
 			a = hw[num] / hw[den]
 			b = fc[num] / fc[den]
 			print(f"  {label:<22}{a:>14.4f}{b:>14.4f}{b/a if a else 0:>9.3f}")
+	if "cycles" not in hw:
+		return failed
 	print(f"  {'-'*59}")
 	# Total instructions. Hardware's "instructions" counter is issue slots, so
 	# the instruction count is that plus the parallel-issue counter - and this
@@ -149,6 +216,20 @@ def report(name, hw, fc):
 	ratio_row("ocache miss rate", "ocache_miss", "operand_access")
 	ratio_row("cyc per icache miss", "icache_stall_cycles", "icache_miss")
 	ratio_row("cyc per ocache miss", "dcache_stall_cycles", "ocache_miss")
+	# The fit. dcache_stall_cycles is one number covering two different events,
+	# so it can only be fitted once the mix is known:
+	#     stall = readMisses * readCost + writeMisses * writeCost
+	# Two workloads with different mixes give two equations. These rows are the
+	# terms of them.
+	ratio_row("ocache write share", "ocache_write_miss", "ocache_miss")
+	ratio_row("operand read share", "operand_read", "operand_access")
+	# Fill cycles against freeze cycles. On hardware these differ by whatever
+	# the write-back buffer and the fill-around hid; in flycast they are the
+	# same number, so a ratio far from 1 on the hardware column is the size of
+	# what the model has no term for.
+	ratio_row("ocache fill/freeze", "ocache_fill_cycles", "dcache_stall_cycles")
+	ratio_row("icache fill/freeze", "icache_fill_cycles", "icache_stall_cycles")
+	ratio_row("branch stall share", "branch_stall_cycles", "cycles")
 	# Share of INSTRUCTIONS that were the second of a pair. The denominator has
 	# to be the instruction count - issue slots plus parallel - not the issue
 	# slots alone, which produced rates above 100%.
@@ -157,6 +238,13 @@ def report(name, hw, fc):
 		b = fc["parallel_issued"] / (fc["instructions"] + fc["parallel_issued"])
 		print(f"  {'paired share':<22}{a:>14.4f}{b:>14.4f}{b/a if a else 0:>9.3f}")
 
+	if compared == 0:
+		# A comparison that compared nothing used to print the header, no rows,
+		# and "all within tolerance". Both probes did exactly that for as long
+		# as they have existed, because validate.py could not parse their
+		# output. A pass has to mean something was checked.
+		print("  NOTHING COMPARED - no counter in hardware.txt was recognised")
+		return 1
 	if worst:
 		worst.sort(reverse=True)
 		print(f"\n  biggest divergence: {worst[0][1]} at {worst[0][2]:.3f}x")
@@ -204,8 +292,8 @@ def main():
 			out = run_flycast(os.path.join(d, elfs[0]), args.flycast_arg)
 			# Keep only the DCBENCH lines: the rest is boot noise that would
 			# make every diff useless.
-			kept = [l for l in out.splitlines()
-					if l.startswith("DCBENCH") or l.startswith("DCPHASE")]
+			kept = [l for l in out.splitlines() if l[:1].isupper()
+					and l.split(" ", 1)[0].isupper()]
 			with open(fcfile, "w") as fh:
 				fh.write("# Written by validate.py. Compare with hardware.txt.\n")
 				fh.write("\n".join(kept) + "\n")

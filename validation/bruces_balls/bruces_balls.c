@@ -30,7 +30,7 @@
 #include <stdlib.h>
 
 //! Number of balls to render (play with me!)
-constexpr unsigned BALL_COUNT    = 93;
+constexpr unsigned BALL_COUNT    = 80;
 //! Number of Z stacks which comprise the ball's geometry
 constexpr unsigned SPHERE_STACKS = 20;
 //! Number of X/Y slices which comprise each stack of the ball's geometry
@@ -416,6 +416,17 @@ static void update_frame_stats(void) {
     }
 }
 
+#ifdef DCBENCH_BUILD
+#include "../bench/dcbench.h"
+
+// The scene is fully deterministic - no RNG anywhere, balls advance by a fixed
+// per-ball velocity - so re-seeding a pass is just rebuilding the initial
+// state. Every pass therefore measures the same 200 frames.
+static void init_balls(Ball *balls);
+static Ball *bench_balls;
+static void bench_seed(void) { init_balls(bench_balls); }
+#endif
+
 //! Program entry point.
 int main(int argc, const char *argv[]) {
     // Array of all balls within the scene, each mapping perfectly to a cache line.
@@ -448,8 +459,14 @@ int main(int argc, const char *argv[]) {
     printf("Rendering %u balls, %u triangles\n", BALL_COUNT, TRIANGLES_TOTAL);
     printf("=================================================\n");
 
+#ifdef DCBENCH_BUILD
+    bench_balls = balls;
+    dcbench_init("bruces_balls", bench_seed);
+    while(dcbench_next_frame()) {
+#else
     // Loop forever... unless the start button is pressed.
     while(SHZ_LIKELY(!check_exit())) {
+#endif
         // Begin rendering a scene with the PVR GPU.
         pvr_scene_begin();
         // Begin submitting opaque geometry to the PVR.
@@ -463,7 +480,15 @@ int main(int argc, const char *argv[]) {
         // Submit our polygon header used by all of Bruce's balls.
         submit_polygon_header(&poly_header, &dr_state);   
 
-        // Render Bruce's balls.
+        // Render Bruce's balls. Split into two phases: the SH4ZAM transform,
+        // which is the hand-scheduled float work, and the store-queue
+        // submission that follows it. Keeping them apart is the point of this
+        // example - it is the only one in the suite that drives the TA through
+        // the store queues, and the SQ cost model has never been checked
+        // against hardware.
+        #ifdef DCBENCH_BUILD
+        dcbench_phase(0, "transform");
+#endif
         for(unsigned i = 0; i < BALL_COUNT; i++) {
             // Prefetch the projection view matrix into the cache.
             SHZ_PREFETCH(&projection_view);
@@ -476,14 +501,27 @@ int main(int argc, const char *argv[]) {
             //! Render Bruce's current ball.
             render_sphere(1.0f, balls[i].color, &dr_state);
         }
-        
+
+        #ifdef DCBENCH_BUILD
+        dcbench_phase(1, "finish");
+#endif
         // Finish submitting geometry to the opaque geometry list.
         pvr_list_finish();
         // Finish rendering the current scene.
         pvr_scene_finish();
+#ifdef DCBENCH_BUILD
+        dcbench_phase(2, "rest");
+#else
         // Update our stats for this frame.
         update_frame_stats();
+#endif
     }
+#ifdef DCBENCH_BUILD
+    dcbench_finish();
+    // Straight out: the shutdown below is not part of what was measured, and
+    // pvr_shutdown() after a benchmark run is where pvr_dma's capture faulted.
+    return EXIT_SUCCESS;
+#endif
     
     // Shut down the GPU before we exit.
     pvr_shutdown();

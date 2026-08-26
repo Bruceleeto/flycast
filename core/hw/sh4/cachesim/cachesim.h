@@ -62,6 +62,14 @@ struct BlockTrace
 	// same cycle, so this can exceed pipeCycles and must never be subtracted
 	// from it. It is a breakdown of why, not an amount of time.
 	u32 pipeStalls;
+	// Issue slots and dual issues, one execution. These are what the SH7091
+	// counters 0x13 and 0x14 count, and they are separate fields rather than
+	// (pipeCycles - pipeStalls) because that difference is not a slot count:
+	// a cycle in which one sequence is blocked and another issues behind it is
+	// charged as a stall and still issues. See pipesim::Result::issueSlots.
+	u32 pipeIssueSlots;
+	u32 pipeParallel;
+	u16 pipeWrapStalls;	// diagnostic, see pipesim::Result::wrapStalls
 	u16 pipeByReason[(int)pipesim::StallReason::Count];
 	bool pipeModelled;	// false if any opcode had no pipeline data
 	// `pref` instructions in this block. A store queue flush is a `pref` to the
@@ -211,6 +219,12 @@ struct PipeTotals
 {
 	u64 cycles;
 	u64 stalls;
+	// Cycles that issued at least one instruction, and instructions that
+	// shared such a cycle with the one ahead. The two sum to the instruction
+	// count, which is what makes them checkable against hardware.
+	u64 issueSlots;
+	u64 parallelIssues;
+	u64 wrapStalls;
 	u64 byReason[(int)pipesim::StallReason::Count];
 	u64 unmodelledBlockExecs;
 };
@@ -270,6 +284,11 @@ struct ProfileRow
 	double pipeCycles;		// issue + interlock, no cache cost
 	double pipeIssue;		// actually issuing instructions
 	double pipeFlowDep;		// waiting on a previous result
+	// The FPU-register share of pipeFlowDep, not a separate quantity - it is
+	// included above as well. Split out because hardware splits it (PMCR 0x28
+	// against 0x29) and because it is the larger half: 7.0% of a texture2d
+	// frame against 4.7% for the CPU registers.
+	double pipeFpuDep;
 	double pipeResource;	// non-parallel-executable groups colliding
 	double pipeStage;		// a stage busy or locked
 	double pipeOtherStall;	// output dependency, and knock-on from the above

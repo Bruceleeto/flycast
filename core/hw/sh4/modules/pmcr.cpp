@@ -58,7 +58,12 @@ enum Event : u16
 	EV_FREEZE_ICACHE_MISS     = 0x24,
 	EV_FREEZE_DCACHE_MISS     = 0x25,
 	EV_FREEZE_CPU_REGISTER    = 0x28,
+	EV_FREEZE_FPU             = 0x29,
 	EV_PARALLEL_ISSUED        = 0x14,
+	EV_OCACHE_READ_MISS       = 0x04,
+	EV_OCACHE_WRITE_MISS      = 0x05,
+	EV_ICACHE_FILL            = 0x21,
+	EV_OCACHE_FILL            = 0x22,
 };
 
 struct Counter
@@ -97,8 +102,7 @@ static u64 sourceValue(u16 mode)
 		// count, and that sum is what a comparison against hardware should be
 		// made on - texture2d has it agreeing to 0.09%, where the raw counter
 		// looked 35% out.
-		const cachesim::PipeTotals p = cachesim::pipeTotals();
-		return p.cycles > p.stalls ? p.cycles - p.stalls : 0;
+		return cachesim::pipeTotals().issueSlots;
 	}
 	case EV_ALL_INSTRUCTION_FETCH:
 		// 32-bit fetch accesses, not instructions: the fetch unit reads two
@@ -108,6 +112,19 @@ static u64 sourceValue(u16 mode)
 		return c.misses[(int)cachesim::Stream::Inst];
 	case EV_OPERAND_CACHE_MISS:
 		return c.misses[(int)cachesim::Stream::Data];
+	case EV_OCACHE_WRITE_MISS:
+		return c.writeMisses;
+	case EV_OCACHE_READ_MISS:
+	{
+		// cachesim counts write misses as a subset of the total, so the read
+		// half is the remainder. Split out because the two do not cost the
+		// same - a read waits for the data, a write does not - and one
+		// cycles-per-miss figure averaged over an unknown mix is why the two
+		// examples disagreed about the data-side cost where they agreed to 4%
+		// about the instruction side.
+		const u64 all = c.misses[(int)cachesim::Stream::Data];
+		return all > c.writeMisses ? all - c.writeMisses : 0;
+	}
 	case EV_OPERAND_ACCESS:
 		return c.dataAccesses;
 	case EV_FREEZE_ICACHE_MISS:
@@ -117,6 +134,32 @@ static u64 sourceValue(u16 mode)
 		// the whole reason both are exposed.
 		return (u64)c.missCycles[(int)cachesim::Stream::Inst];
 	case EV_FREEZE_DCACHE_MISS:
+	{
+		// Store queue drain belongs here. Hardware puts it in this counter and
+		// not in a separate one: `validation/bruces_balls` freezes 47.46M
+		// cycles on 0x25 while missing the operand cache 24786 times, which is
+		// 1915 cycles per miss and obviously not a miss. Its operand cache FILL
+		// counter (0x22) reads 506770, so 99% of that freeze has no fill behind
+		// it. cachesim tracks the two separately and reporting only the miss
+		// half made this counter read 0.005 on the one workload that uses the
+		// store queues heavily.
+		const cachesim::PenaltyConfig& p = cachesim::penaltyConfig();
+		const double sq =
+				c.sqFlushes[(int)cachesim::SqDest::Ta] * p.sqFlushTa
+				+ (c.sqFlushes[(int)cachesim::SqDest::Ram]
+					+ c.sqFlushes[(int)cachesim::SqDest::Other]) * p.sqFlushRam;
+		return (u64)(c.missCycles[(int)cachesim::Stream::Data] + sq);
+	}
+	// Fill cycles. Hardware distinguishes these from the pipeline freeze
+	// above: a fill occupies the bus, a freeze is what the CPU lost waiting
+	// for it, and the difference is whatever the write-back buffer and the
+	// fill-around hid. cachesim has one quantity and so answers both with it.
+	// That is not a claim the two are equal - it is the model having nothing
+	// to say about the difference, and a hardware capture where they diverge
+	// says how much is missing.
+	case EV_ICACHE_FILL:
+		return (u64)c.missCycles[(int)cachesim::Stream::Inst];
+	case EV_OCACHE_FILL:
 		return (u64)c.missCycles[(int)cachesim::Stream::Data];
 	// EV_ON_CHIP_IO_ACCESS is deliberately absent and reads zero. It counts
 	// accesses to the SH4's OWN on-chip registers - the timers, the serial
@@ -125,6 +168,13 @@ static u64 sourceValue(u16 mode)
 	// every access that bypassed the cache and so is dominated by the PVR,
 	// 15294 per frame in the same run. Mapping one to the other made the two
 	// columns differ by 206x and said nothing about either.
+	// EV_PIPELINE_FREEZE_BY_BRANCH (0x27) and EV_OPERAND_READ_ACCESS (0x01)
+	// are deliberately absent and read zero. pipesim analyses a block as if it
+	// looped forever with no transition cost, so it has no branch penalty to
+	// report; cachesim counts operand accesses without splitting them by
+	// direction. Both are captured on hardware anyway - the first to size the
+	// branch model pipesim needs, the second as the denominator the read and
+	// write miss counts above are fitted against.
 	// EV_BRANCH_ISSUED and EV_BRANCH_TAKEN are deliberately absent and read
 	// zero. Block entries were reported here for a while, on the grounds that
 	// a translated block ends in a control transfer - but blocks also end on
@@ -135,22 +185,30 @@ static u64 sourceValue(u16 mode)
 	// needs the decoder to classify block terminators; until it does, zero.
 	case EV_PARALLEL_ISSUED:
 	{
-		// The SH4 issues up to two instructions per cycle, so every cycle that
-		// retired two contributed one "parallel" issue: instructions minus the
-		// cycles spent issuing them. pipesim decides which pairs are legal, so
-		// this is that model's dual-issue rate and not an independent one.
-		const cachesim::PipeTotals p = cachesim::pipeTotals();
-		const u64 issueCycles = p.cycles > p.stalls ? p.cycles - p.stalls : 0;
+		// The SH4 issues up to two instructions per cycle. pipesim decides
+		// which pairs are legal, so this is that model's dual-issue rate and
+		// not an independent one.
+		//
 		// Instructions that shared a cycle with the one ahead of them. With
 		// EV_INSTRUCTION_ISSUED above this partitions the instruction count,
 		// exactly as the two hardware counters do.
-		return c.instFetched > issueCycles ? c.instFetched - issueCycles : 0;
+		//
+		// Counted in the pipeline model rather than derived as
+		// (instructions - issue cycles), which was the first attempt and was
+		// wrong: pipesim charges a cycle as a stall if anything in the machine
+		// was blocked in it, including cycles that issued behind the blockage.
+		// Subtracting those gave 2.15 instructions per slot, which no
+		// two-issue machine can do, and inflated the dual-issue rate to 53%
+		// against hardware's 26%.
+		return cachesim::pipeTotals().parallelIssues;
 	}
 	case EV_FREEZE_CPU_REGISTER:
-		// pipesim's flow dependency stalls: waiting on a previous result. It
-		// does not split by functional unit, so the FPU freeze counter has no
-		// answer here and reads zero rather than double-counting this one.
+		// Flow-dependency stalls on a CPU register. pipesim classifies these by
+		// which register file the waited-on value lives in, which is the same
+		// line hardware draws between this counter and the FPU one below.
 		return cachesim::pipeTotals().byReason[(int)pipesim::StallReason::FlowDep];
+	case EV_FREEZE_FPU:
+		return cachesim::pipeTotals().byReason[(int)pipesim::StallReason::FpuDep];
 	default:
 		if (!warned[mode & 0x3f])
 		{

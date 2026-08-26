@@ -1,0 +1,24 @@
+# Written by validate.py. Compare with hardware.txt.
+DCBENCH begin sqmark passes=10 warmup=30 frames=200
+DCSPG fb_r_ctrl=00800005 spg_hblank_int=031d0000 spg_vblank_int=00150208 spg_control=00000100 spg_load=020c0359 spg_vblank=00240204
+DCBENCH sqmark frames=200 cycles=594387536 instructions=407277923 renders=200 vblanks=200 wall_ns=3346393040
+DCPHASE sqmark cycles burst=83716408 med=153053376 slow=354937408 rest=2680344
+DCBENCH sqmark frames=200 icache_miss=40594 ocache_miss=9480 renders=200 vblanks=200 wall_ns=3343884640
+DCPHASE sqmark icache_miss burst=3901 med=1592 slow=3306 rest=31795
+DCBENCH sqmark frames=200 icache_stall_cycles=1104647 dcache_stall_cycles=12621019 renders=200 vblanks=200 wall_ns=3343880480
+DCPHASE sqmark icache_stall_cycles burst=105286 med=43796 slow=89646 rest=865919
+DCBENCH sqmark frames=200 ifetch=277321148 operand_access=113519740 renders=200 vblanks=200 wall_ns=3343882800
+DCPHASE sqmark ifetch burst=43414206 med=73306552 slow=159822171 rest=778219
+DCBENCH sqmark frames=200 reg_stall_cycles=176836037 fpu_stall_cycles=3714400 renders=200 vblanks=200 wall_ns=3343888960
+DCPHASE sqmark reg_stall_cycles burst=10885171 med=39650676 slow=126095232 rest=204958
+DCBENCH sqmark frames=200 parallel_issued=131396485 branch_taken=0 renders=200 vblanks=200 wall_ns=3343888880
+DCPHASE sqmark parallel_issued burst=25295318 med=38449254 slow=67292771 rest=359142
+DCBENCH sqmark frames=200 io_access=0 branch_issued=0 renders=200 vblanks=200 wall_ns=3346387280
+DCPHASE sqmark io_access burst=0 med=0 slow=0 rest=0
+DCBENCH sqmark frames=200 ocache_read_miss=9305 ocache_write_miss=104 renders=200 vblanks=200 wall_ns=3346387120
+DCPHASE sqmark ocache_read_miss burst=1233 med=168 slow=231 rest=7673
+DCBENCH sqmark frames=200 ocache_fill_cycles=200679 icache_fill_cycles=1104075 renders=200 vblanks=200 wall_ns=3346387840
+DCPHASE sqmark ocache_fill_cycles burst=25591 med=3738 slow=4956 rest=166394
+DCBENCH sqmark frames=200 branch_stall_cycles=0 operand_read=0 renders=200 vblanks=200 wall_ns=3343882800
+DCPHASE sqmark branch_stall_cycles burst=0 med=0 slow=0 rest=0
+DCBENCH end sqmark
