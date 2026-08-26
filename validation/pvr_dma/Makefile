@@ -3,7 +3,7 @@ OBJS = pvr_dma.o romdisk.o
 KOS_ROMDISK_DIR = romdisk
 
 # Optimization flags
-KOS_CFLAGS += -std=gnu2x -O3 \
+KOS_CFLAGS += -std=gnu2x -O3 -DDCBENCH_BUILD \
               -fomit-frame-pointer -ffast-math -ffp-contract=fast \
               -fmerge-all-constants -funroll-loops \
               -ftree-vectorize

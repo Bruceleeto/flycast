@@ -56,6 +56,9 @@ struct State
 	u64 pipeStallsTotal = 0;
 	u64 pipeByReason[(int)pipesim::StallReason::Count] = {};
 	u64 pipeUnmodelledBlocks = 0;
+	// Block entries. Every translated block ends in a control transfer, so this
+	// is the dynarec's nearest equivalent of a taken-branch count.
+	u64 blockExecTotal = 0;
 	u64 lastSchedCycles = 0;
 	u64 frameCycles = 0;
 
@@ -246,6 +249,7 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.sqCyclePerFrame.resize(size, 0.0);
 	}
 	st.execCount[bt->id]++;
+	st.blockExecTotal++;
 	// Pipeline cycles are a property of the block, so this is a multiply, not
 	// a measurement: no per-instruction work on the hot path.
 	st.pipeCyclesTotal += bt->pipeCycles;
@@ -568,6 +572,7 @@ void reset()
 	st.pipeStallsTotal = 0;
 	memset(st.pipeByReason, 0, sizeof(st.pipeByReason));
 	st.pipeUnmodelledBlocks = 0;
+	st.blockExecTotal = 0;
 	// The scheduler clock does not restart with us. Zeroing this instead of
 	// sampling it makes the next frame boundary charge everything that happened
 	// before the reset to a single frame, which silently inflates the guest
@@ -749,6 +754,7 @@ PipeTotals pipeTotals()
 // Results
 //
 const Counters& counters() { return state().model.counters(); }
+u64 blockExecs() { return state().blockExecTotal; }
 u64 frameCount() { return state().frames; }
 u64 guestCycles() { return state().totalCycles; }
 u64 frameGuestCycles() { return state().frameCycles; }

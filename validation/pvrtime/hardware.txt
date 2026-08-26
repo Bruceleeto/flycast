@@ -1,0 +1,35 @@
+# pvrtime, Dreamcast, KallistiOS v2.3.0 (4fdde8b2).
+# PVR render time between the hardware's own RNDSTART and RNDDONE interrupts
+# (KOS pvr_stats_t.rnd_last_time). Untextured flat-shaded quads.
+# Full valid capture, translucent list included.
+DCPVR begin warm=6 measure=9
+DCPVR geom list=op quads=16 w=2 h=2 px=64 vtxbytes=1216 rnd_ns=3165840 reg_ns=52400 loops=15 renders=13 vblanks=13 wall_ns=207925200
+DCPVR geom list=op quads=32 w=2 h=2 px=128 vtxbytes=2432 rnd_ns=3174160 reg_ns=69040 loops=15 renders=15 vblanks=15 wall_ns=252276880
+DCPVR geom list=op quads=64 w=2 h=2 px=256 vtxbytes=4864 rnd_ns=3191040 reg_ns=103440 loops=15 renders=15 vblanks=15 wall_ns=249767680
+DCPVR geom list=op quads=128 w=2 h=2 px=512 vtxbytes=9728 rnd_ns=3227840 reg_ns=172400 loops=15 renders=15 vblanks=15 wall_ns=249842640
+DCPVR geom list=op quads=256 w=2 h=2 px=1024 vtxbytes=19456 rnd_ns=3294320 reg_ns=311840 loops=15 renders=15 vblanks=15 wall_ns=249962800
+DCPVR geom list=op quads=512 w=2 h=2 px=2048 vtxbytes=38912 rnd_ns=3499440 reg_ns=587840 loops=15 renders=15 vblanks=15 wall_ns=252541760
+DCPVR geom list=op quads=1024 w=2 h=2 px=4096 vtxbytes=77824 rnd_ns=3946640 reg_ns=1148640 loops=15 renders=15 vblanks=15 wall_ns=250356880
+DCPVR geom list=op quads=2048 w=2 h=2 px=8192 vtxbytes=155648 rnd_ns=4816640 reg_ns=2259600 loops=15 renders=15 vblanks=15 wall_ns=250939920
+DCPVR fill list=op quads=1 w=8 h=8 px=64 vtxbytes=76 rnd_ns=3154880 reg_ns=33919 loops=15 renders=15 vblanks=15 wall_ns=247571519
+DCPVR fill list=op quads=1 w=32 h=32 px=1024 vtxbytes=76 rnd_ns=3155120 reg_ns=33839 loops=15 renders=15 vblanks=15 wall_ns=252261279
+DCPVR fill list=op quads=1 w=64 h=64 px=4096 vtxbytes=76 rnd_ns=3154960 reg_ns=33759 loops=15 renders=15 vblanks=15 wall_ns=249721279
+DCPVR fill list=op quads=1 w=128 h=128 px=16384 vtxbytes=76 rnd_ns=3155920 reg_ns=33759 loops=15 renders=15 vblanks=15 wall_ns=249776719
+DCPVR fill list=op quads=1 w=256 h=256 px=65536 vtxbytes=76 rnd_ns=3155040 reg_ns=33919 loops=15 renders=15 vblanks=15 wall_ns=249809759
+DCPVR fill list=op quads=1 w=480 h=480 px=230400 vtxbytes=76 rnd_ns=3155680 reg_ns=33519 loops=15 renders=15 vblanks=15 wall_ns=252330159
+DCPVR fill list=op quads=1 w=640 h=480 px=307200 vtxbytes=76 rnd_ns=3155840 reg_ns=22319 loops=15 renders=15 vblanks=15 wall_ns=249819679
+DCPVR over list=op quads=1 w=640 h=480 px=307200 vtxbytes=76 rnd_ns=3156320 reg_ns=22159 loops=15 renders=15 vblanks=15 wall_ns=249813199
+DCPVR over list=op quads=2 w=640 h=480 px=614400 vtxbytes=152 rnd_ns=3160000 reg_ns=27999 loops=15 renders=15 vblanks=15 wall_ns=249841919
+DCPVR over list=op quads=4 w=640 h=480 px=1228800 vtxbytes=304 rnd_ns=3171200 reg_ns=38159 loops=15 renders=15 vblanks=15 wall_ns=252317679
+DCPVR over list=op quads=8 w=640 h=480 px=2457600 vtxbytes=608 rnd_ns=3190160 reg_ns=58479 loops=15 renders=15 vblanks=15 wall_ns=249783679
+DCPVR over list=op quads=16 w=640 h=480 px=4915200 vtxbytes=1216 rnd_ns=3321680 reg_ns=103679 loops=15 renders=15 vblanks=15 wall_ns=249853439
+DCPVR over list=op quads=32 w=640 h=480 px=9830400 vtxbytes=2432 rnd_ns=6360160 reg_ns=190159 loops=15 renders=15 vblanks=15 wall_ns=249843999
+DCPVR over list=tr quads=1 w=640 h=480 px=307200 vtxbytes=76 rnd_ns=6262160 reg_ns=22159 loops=15 renders=15 vblanks=15 wall_ns=252071199
+DCPVR over list=tr quads=2 w=640 h=480 px=614400 vtxbytes=152 rnd_ns=9373680 reg_ns=27439 loops=15 renders=15 vblanks=15 wall_ns=249823759
+DCPVR over list=tr quads=4 w=640 h=480 px=1228800 vtxbytes=304 rnd_ns=15597440 reg_ns=38719 loops=15 renders=15 vblanks=15 wall_ns=249855999
+DCPVR over list=tr quads=8 w=640 h=480 px=2457600 vtxbytes=608 rnd_ns=28045200 reg_ns=59119 loops=15 renders=15 vblanks=28 wall_ns=469240480
+DCPVR over list=tr quads=16 w=640 h=480 px=4915200 vtxbytes=1216 rnd_ns=52940400 reg_ns=104719 loops=15 renders=15 vblanks=56 wall_ns=933845520
+DCPVR over list=tr quads=32 w=640 h=480 px=9830400 vtxbytes=2432 rnd_ns=102730880 reg_ns=11174719 loops=15 renders=15 vblanks=99 wall_ns=1656234160
+DCPVR mix list=op quads=400 w=32 h=32 px=409600 vtxbytes=30400 rnd_ns=3260720 reg_ns=478960 loops=15 renders=15 vblanks=27 wall_ns=452783760
+DCPVR mix list=tr quads=400 w=32 h=32 px=409600 vtxbytes=30400 rnd_ns=7316640 reg_ns=479040 loops=15 renders=15 vblanks=15 wall_ns=249772720
+DCPVR end

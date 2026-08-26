@@ -1,0 +1,17 @@
+# Written by validate.py. Compare with hardware.txt.
+DCBENCH begin pvr_dma passes=7 warmup=30 frames=200
+DCBENCH pvr_dma frames=200 cycles=422256804 instructions=208060723 renders=200 vblanks=200 wall_ns=3343870720
+DCPHASE pvr_dma cycles camera=89600 transform=418882240 finish=3269284 rest=15680
+DCBENCH pvr_dma frames=200 icache_miss=77169 ocache_miss=5317588 renders=200 vblanks=200 wall_ns=3343867520
+DCPHASE pvr_dma icache_miss camera=2768 transform=30889 finish=42110 rest=1402
+DCBENCH pvr_dma frames=200 icache_stall_cycles=1298253 dcache_stall_cycles=61650531 renders=200 vblanks=200 wall_ns=3343867440
+DCPHASE pvr_dma icache_stall_cycles camera=46491 transform=523617 finish=704600 rest=23545
+DCBENCH pvr_dma frames=200 ifetch=228533075 operand_access=154668528 renders=200 vblanks=200 wall_ns=3343869760
+DCPHASE pvr_dma ifetch camera=22515 transform=227377856 finish=1123099 rest=9605
+DCBENCH pvr_dma frames=200 reg_stall_cycles=119619923 fpu_stall_cycles=0 renders=200 vblanks=200 wall_ns=3346369840
+DCPHASE pvr_dma reg_stall_cycles camera=12247 transform=119032641 finish=570636 rest=4399
+DCBENCH pvr_dma frames=200 parallel_issued=225166933 branch_taken=0 renders=200 vblanks=200 wall_ns=3346372160
+DCPHASE pvr_dma parallel_issued camera=22308 transform=224056015 finish=1079405 rest=9205
+DCBENCH pvr_dma frames=200 io_access=0 branch_issued=0 renders=200 vblanks=200 wall_ns=3343865200
+DCPHASE pvr_dma io_access camera=0 transform=0 finish=0 rest=0
+DCBENCH end pvr_dma

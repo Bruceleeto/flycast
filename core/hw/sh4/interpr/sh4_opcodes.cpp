@@ -12,6 +12,8 @@
 #include "hw/sh4/dyna/decoder.h"
 #include "emulator.h"
 
+#include "hw/sh4/modules/pmcr.h"
+
 #ifdef STRICT_MODE
 #include "hw/sh4/sh4_cache.h"
 #endif
@@ -962,6 +964,12 @@ sh4op(i0000_0000_0001_1011)
 	//just wait for an Interrupt
 	int i = 0, s = 1;
 
+	// The CPU is halted for however long this takes, and PMCR's elapsed-time
+	// counter does not run while it is. Bracket the wait so the performance
+	// counters can subtract it; `sleep` itself is charged 4 cycles by the
+	// block, which are also asleep rather than executing.
+	const u64 sleepStart = sh4_sched_now64();
+
 	while (!UpdateSystem_INTC())//448
 	{
 		if (i++>1000)
@@ -973,6 +981,8 @@ sh4op(i0000_0000_0001_1011)
 	//if not Interrupted , we must rexecute the sleep
 	if (s == 0)
 		ctx->pc -= 2;// re execute sleep
+
+	pmcr::noteSleep(sh4_sched_now64() - sleepStart + 4);
 }
 
 

@@ -16,6 +16,7 @@
 #include <array>
 #include <map>
 #include "cachesim/cachesim.h"
+#include "modules/pmcr.h"
 
 static std::array<u8, 0x2000> OnChipRAM;	// 8 KB
 
@@ -403,6 +404,13 @@ T DYNACALL ReadMem_p4mmr(u32 addr)
 	*/
 	if (likely(addr == 0xFF000028))
 		return (T)CCN_INTEVT;
+	// Performance counters. Intercepted ahead of the module switch because the
+	// control pair sits inside CCN's range while the counters themselves sit in
+	// an area no module claims.
+	if (pmcr::isControlAddr(addr))
+		return (T)pmcr::readControl(addr);
+	if (pmcr::isCounterAddr(addr))
+		return (T)pmcr::readCounter(addr);
 	if (likely(addr == 0xFFA0002C))
 		return (T)DMAC_CHCR(2).full;
 
@@ -475,6 +483,11 @@ void DYNACALL WriteMem_p4mmr(u32 addr, T data)
 {
 	DEBUG_LOG(SH4, "write %s = %x", regName(addr), (int)data);
 
+	if (pmcr::isControlAddr(addr))
+	{
+		pmcr::writeControl(addr, (u16)data);
+		return;
+	}
 	if (likely(addr == 0xFF000038))
 	{
 		CCN_QACR_write<0>(addr, data);
@@ -617,6 +630,7 @@ void sh4_mmr_reset(bool hard)
 	sci.reset();
 	tmu.reset();
 	ubc.reset();
+	pmcr::reset();
 
 	MMU_reset();
 	memset(p_sh4rcb->cntx.sq_buffer, 0, sizeof(p_sh4rcb->cntx.sq_buffer));

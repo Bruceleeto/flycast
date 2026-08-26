@@ -215,6 +215,11 @@ struct PipeTotals
 	u64 unmodelledBlockExecs;
 };
 PipeTotals pipeTotals();
+// Translated block entries since the counters were cleared. Every block ends in
+// a control transfer, so this is also the closest thing the dynarec has to a
+// taken-branch count - blocks that fall through to their successor are the
+// error term, and it is reported rather than corrected for.
+u64 blockExecs();
 void markLogWindow();
 
 double derivedMissCycles(Stream stream);

@@ -303,7 +303,32 @@ void scheduleRenderDone(TA_context *cntx)
 			int size = 0;
 			for (TA_context *c = cntx; c != nullptr; c = c->nextContext)
 				size += c->tad.thd_data - c->tad.thd_root;
-			cycles = std::min(450000 + size * 100, 1500000);
+			// Fitted to hardware by validation/pvrtime, which times the PVR's
+			// own RNDSTART..RNDDONE interrupts while sweeping TA data volume
+			// over a 128x range. The fit holds to 1.2% across all of it:
+			//
+			//     cycles = 624083 + 1.2747 * size
+			//
+			// The previous constants - 450000 + 100 * bytes - were 28% low on
+			// the floor and 47x too steep per byte, so any real scene pinned
+			// the cap immediately and every render took 7.5ms.
+			//
+			// There is deliberately no term for pixels drawn. The same probe
+			// renders an 8x8 quad and a 640x480 quad in an identical 3.156ms:
+			// on a deferred renderer opaque fill really is free, so a fill
+			// term would be modelling something that does not exist.
+			//
+			// The cap stays as a backstop. It no longer binds on anything
+			// measured - 155648 bytes of TA data comes to 960k cycles - but
+			// heavy per-tile overdraw has a cliff this linear fit does not
+			// describe: 32 full-screen quads cost 2x what 16 do, on 2432
+			// bytes of data, which is object pointer buffer overflow rather
+			// than anything the byte count can see.
+			// Note `size` here is the whole display list, object pointer
+			// blocks included, which runs about 1.7x the vertex bytes a guest
+			// sees through PVR_TA_VERTBUF_POS. The coefficient is fitted
+			// against THIS quantity, not against the guest-visible one.
+			cycles = std::min(624083 + (int)(size * 1.2747), 1500000);
 		}
 	}
 	sh4_sched_request(render_end_schid, cycles);

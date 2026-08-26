@@ -1,0 +1,17 @@
+# Written by validate.py. Compare with hardware.txt.
+DCBENCH begin texture2d passes=7 warmup=30 frames=200
+DCBENCH texture2d frames=200 cycles=404483304 instructions=132823128 renders=200 vblanks=200 wall_ns=3343876480
+DCPHASE texture2d cycles pick=1237824 draw=335393408 submit=67828776 rest=23296
+DCBENCH texture2d frames=200 icache_miss=3862854 ocache_miss=3220996 renders=200 vblanks=200 wall_ns=3346376400
+DCPHASE texture2d icache_miss pick=1906 draw=3794617 submit=65332 rest=999
+DCBENCH texture2d frames=200 icache_stall_cycles=64896956 dcache_stall_cycles=30333746 renders=200 vblanks=200 wall_ns=3346378560
+DCPHASE texture2d icache_stall_cycles pick=32032 draw=63751360 submit=1096780 rest=16784
+DCBENCH texture2d frames=200 ifetch=156418890 operand_access=101940139 renders=200 vblanks=200 wall_ns=3346378560
+DCPHASE texture2d ifetch pick=555241 draw=127827353 submit=28030299 rest=5997
+DCBENCH texture2d frames=200 reg_stall_cycles=83412813 fpu_stall_cycles=0 renders=200 vblanks=200 wall_ns=3343876240
+DCPHASE texture2d reg_stall_cycles pick=199242 draw=62478522 submit=20732649 rest=2400
+DCBENCH texture2d frames=200 parallel_issued=152146916 branch_taken=0 renders=200 vblanks=200 wall_ns=3343875040
+DCPHASE texture2d parallel_issued pick=538241 draw=124616917 submit=26986161 rest=5597
+DCBENCH texture2d frames=200 io_access=0 branch_issued=0 renders=200 vblanks=200 wall_ns=3343882480
+DCPHASE texture2d io_access pick=0 draw=0 submit=0 rest=0
+DCBENCH end texture2d

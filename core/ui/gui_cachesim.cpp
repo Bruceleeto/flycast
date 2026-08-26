@@ -357,20 +357,20 @@ void drawCacheSimPanel()
 	{
 		const cachesim::ProfileRow& top = rows.front();
 		const double topTotal = rowTotal(top);
-		ImGui::PushTextWrapPos(0.f);
+		// Only when there is something to answer. Under budget, the headline
+		// figure and the measured lines below already say it, and a sentence
+		// of advice inferred from one threshold is the one thing here that can
+		// be wrong about its own data.
 		if (budgetPct > 100.0)
+		{
+			ImGui::PushTextWrapPos(0.f);
 			ImGui::TextColored(ImVec4(1.00f, 0.55f, 0.35f, 1.f),
 					"CPU-bound. %s is %.0f%% of it. %s",
 					top.name.c_str(),
 					modelled == 0 ? 0.0 : 100.0 * topTotal / modelled,
 					verdict(top, topTotal));
-		else
-			ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.55f, 1.f),
-					"Fits in a 60fps frame with %.0f%% to spare. If the frame rate "
-					"is still short, the limit is elsewhere - graphics hardware, or "
-					"waiting on vsync - and making this code faster will not move it.",
-					100.0 - budgetPct);
-		ImGui::PopTextWrapPos();
+			ImGui::PopTextWrapPos();
+		}
 	}
 
 	ImGui::TextDisabled("flycast counts %.2fM for the same frame", frameCycles / 1e6);

@@ -39,6 +39,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         modules/mmu.cpp
         modules/mmu.h
         modules/modules.h
+        modules/pmcr.cpp
+        modules/pmcr.h
         modules/rtc.cpp
         modules/serial.cpp
         modules/tmu.cpp

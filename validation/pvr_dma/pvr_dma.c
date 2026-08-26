@@ -544,6 +544,7 @@ static float cam_z = -28.0f;
 static float cam_yaw = F_PI * 0.75f;
 static float cam_pitch = 0.0f;
 
+#ifndef DCBENCH_BUILD
 static void update_camera(cont_state_t *state)
 {
     if (!state)
@@ -642,6 +643,7 @@ static void update_camera(cont_state_t *state)
     if (state->buttons & CONT_A)
         debug_color ^= 1;
 }
+#endif
 
 static texture_t *load_texture(const char *filename)
 {
@@ -1064,6 +1066,44 @@ static int render_model(pvr_list_t list)
     return last_drawn;
 }
 
+#ifdef DCBENCH_BUILD
+#include "../bench/dcbench.h"
+
+// A scripted camera. The controller cannot drive a measurement: two runs would
+// see different input and cover different geometry, and near-z clipping means
+// the amount of work depends entirely on where the camera is looking. This
+// orbits the scene on a fixed path derived from the frame index alone, so
+// every pass draws exactly the same frames.
+static int bench_frame;
+
+static void bench_seed(void)
+{
+    bench_frame = 0;
+    cam_x = -18.0f;
+    cam_y = -0.6f;
+    cam_z = -28.0f;
+    cam_yaw = F_PI * 0.75f;
+    cam_pitch = 0.0f;
+    fog_near = 8.0f;
+    fog_far = 27.0f;
+    debug_color = 0;
+}
+
+static void bench_camera(void)
+{
+    // One full turn every 240 frames, drifting in and out so the near-z clip
+    // and the fog table both get exercised rather than sitting at one depth.
+    const float t = (float)bench_frame * (2.0f * F_PI / 240.0f);
+    const float radius = 22.0f + 8.0f * sinf(t * 0.5f);
+    cam_x = radius * cosf(t);
+    cam_z = radius * sinf(t);
+    cam_y = -0.6f + 3.0f * sinf(t * 0.25f);
+    cam_yaw = t + F_PI * 0.5f;
+    cam_pitch = 0.15f * sinf(t * 0.75f);
+    bench_frame++;
+}
+#endif
+
 int main(int argc, char **argv)
 {
     pvr_list_t poly_type = PVR_LIST_OP_POLY;
@@ -1087,6 +1127,13 @@ int main(int argc, char **argv)
     pvr_fog_table_color(1.0f, 0.102f * 0.5f, 0.219f * 0.5f, 0.165f * 0.5f);
     pvr_fog_table_linear(fog_near, fog_far);
 
+#ifdef DCBENCH_BUILD
+    dcbench_init("pvr_dma", bench_seed);
+    while (dcbench_next_frame())
+    {
+        dcbench_phase(0, "camera");
+        bench_camera();
+#else
     while (1)
     {
         maple_device_t *cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -1102,6 +1149,7 @@ int main(int argc, char **argv)
                 update_camera(state);
             }
         }
+#endif
 
         drawn = 0;
         written_total = 0;
@@ -1119,16 +1167,31 @@ int main(int argc, char **argv)
             pvr_fog_table_color(1.0f, 0.102f * 0.5f, 0.219f * 0.5f, 0.165f * 0.5f);
         }
 
+#ifdef DCBENCH_BUILD
+        dcbench_phase(1, "transform");
+#endif
         int submitted = render_model(poly_type);
+#ifdef DCBENCH_BUILD
+        dcbench_phase(2, "finish");
+#endif
 
         pvr_scene_finish();
+#ifdef DCBENCH_BUILD
+        dcbench_phase(3, "rest");
+#endif
 
         frames++;
 
         uint32 current_time = timer_ms_gettime64();
 
+#ifdef DCBENCH_BUILD
+        (void)current_time; (void)submitted;
+        if (0)
+        {
+#else
         if (current_time - last_time >= 2000)
         {
+#endif
             fps = shz_divf((frames * 1000.0f), (current_time - last_time));
             printf("FPS: %.2f | Fog: (%.3f, %.3f) | Faces: %d (submitted %d, drawn %d,) | Materials: %d | Cam: (%.1f, %.1f, %.1f)\n",
                    fps, fog_near, fog_far, num_faces, submitted, drawn, num_materials, cam_x, cam_y, cam_z);
@@ -1136,6 +1199,15 @@ int main(int argc, char **argv)
             last_time = current_time;
         }
     }
+
+#ifdef DCBENCH_BUILD
+    dcbench_finish();
+    // Stop here. The teardown below faults on hardware - it was unreachable in
+    // the original, whose loop only exited on START, so it has never run. Not
+    // this harness's job to fix, and running it would only risk losing the
+    // output that has already been printed.
+    return 0;
+#endif
 
     for (int i = 0; i < num_materials; i++)
     {

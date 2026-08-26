@@ -1,0 +1,30 @@
+# texture2d, Dreamcast, KallistiOS v2.3.0 (4fdde8b2), GLdc 1.1-698-ga1cd.
+#
+# IMPORTANT, two counter semantics that are not what their names suggest:
+#  * `instructions` (PMCR 0x13) counts issue SLOTS. The instruction count is
+#    this plus `parallel_issued` (0x14): 286020327 here.
+#  * `cycles` (PMCR 0x23) counts only while the CPU is AWAKE. The counter stops
+#    dead when the SH4 halts - validation/pmcrclock measures 200.00MHz busy
+#    against 0.78MHz across a sleep. Wall time for this run is 3.3442s, which
+#    at 200MHz would be 668.8M cycles; 462.1M of those were executing and the
+#    rest were idle waiting on the display.
+#
+# Cache miss counts are ~96% conflict misses and move up to 23% with code
+# layout, so this file is only valid for the exact ELF that produced it.
+DCBENCH begin texture2d passes=7 warmup=30 frames=200
+DCSPG fb_r_ctrl=00800005 spg_hblank_int=03450000 spg_vblank_int=00150208 spg_control=00000100 spg_load=020c0359 spg_vblank=00240204
+DCBENCH texture2d frames=200 cycles=462100902 instructions=210281660 renders=200 vblanks=200 wall_ns=3344173200
+DCPHASE texture2d cycles pick=1213692 draw=380819528 submit=80011678 rest=56004
+DCBENCH texture2d frames=200 icache_miss=3869238 ocache_miss=3488884 renders=200 vblanks=200 wall_ns=3344173600
+DCPHASE texture2d icache_miss pick=2357 draw=3794716 submit=71166 rest=999
+DCBENCH texture2d frames=200 icache_stall_cycles=97596432 dcache_stall_cycles=97470703 renders=200 vblanks=200 wall_ns=3346677600
+DCPHASE texture2d icache_stall_cycles pick=61627 draw=95040562 submit=2468451 rest=25792
+DCBENCH texture2d frames=200 ifetch=169727250 operand_access=112630989 renders=200 vblanks=200 wall_ns=3346676560
+DCPHASE texture2d ifetch pick=660661 draw=135092268 submit=33968526 rest=5795
+DCBENCH texture2d frames=200 reg_stall_cycles=21754203 fpu_stall_cycles=33171732 renders=200 vblanks=200 wall_ns=3344161040
+DCPHASE texture2d reg_stall_cycles pick=52005 draw=17590607 submit=4110591 rest=1000
+DCBENCH texture2d frames=200 parallel_issued=75738667 branch_taken=15640910 renders=200 vblanks=200 wall_ns=3344173360
+DCPHASE texture2d parallel_issued pick=212778 draw=62620419 submit=13136807 rest=2598
+DCBENCH texture2d frames=200 io_access=17247 branch_issued=25784543 renders=200 vblanks=200 wall_ns=3344184000
+DCPHASE texture2d io_access pick=631 draw=5312 submit=10704 rest=600
+DCBENCH end texture2d
