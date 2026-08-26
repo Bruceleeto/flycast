@@ -96,6 +96,12 @@ inline bool armed() { return g_armed; }
 // cache answers most questions on its own.
 extern bool g_dataFeed;
 inline bool dataFeed() { return g_dataFeed; }
+// Whether the PIPELINE model drives emulated timing, replacing flycast's own
+// per-block issue estimate. Separate opt-in from g_timing because it changes
+// emulated time for every guest, not just the miss cost: see the note at the
+// charge site in cachesim.cpp. Implies g_timing.
+extern bool g_pipeTiming;
+inline bool pipeTiming() { return g_pipeTiming; }
 // Whether modelled miss cycles are charged to flycast's own timing. This makes
 // the simulator change the emulation instead of only observing it: a run with
 // it on is a different run, and nothing measured there is comparable with a
@@ -318,6 +324,15 @@ double profileAccountedCycles();
 // Reporting (cachesim_report.cpp)
 //
 void logSummary();
+// Everything logSummary does, plus the profile, the block table and the JSON
+// report if one was asked for - the same output the -cachesim-frames limit
+// produces when it fires. Call this when a run ends for any OTHER reason.
+//
+// Without it, `-cachesim-frames 0` - the only sensible setting when you do not
+// know a title's frame count in advance, which is every commercial game -
+// produced the summary lines and NO profile, because the profile was only ever
+// written on the frame-limit path.
+void reportFinal();
 // Per-function table: where the frame goes, ranked, with a stall breakdown.
 void logProfile(size_t limit = 24);
 // Per-BLOCK breakdown, hottest first. The per-function table groups by symbol,

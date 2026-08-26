@@ -520,7 +520,7 @@ struct Cache
 
 	// Bounded top-K of (line, evicted line) pairs. Per-set state for hundreds of
 	// sets, so it cannot be allowed to grow.
-	static constexpr size_t EVICTORS_PER_SET = 8;
+	static constexpr size_t EVICTORS_PER_SET = 64;
 
 	struct EvictorTable
 	{

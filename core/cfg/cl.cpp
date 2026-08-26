@@ -48,7 +48,9 @@ static void usage(const char *exe)
 	fprintf(stderr, "-cachesim-trace file           record the block execution stream, for replaying\n");
 	fprintf(stderr, "                               layout changes offline with cachesweep. Large:\n");
 	fprintf(stderr, "                               tens of MB per guest second. Implies -cachesim.\n");
-	fprintf(stderr, "-cachesim-frames n             measure n guest frames, then report and stop.\n");
+	fprintf(stderr, "-cachesim-frames n             measure n guest frames, then report and exit 0.\n");
+	fprintf(stderr, "                               0 means no limit: flycast will NOT exit on its own,\n");
+	fprintf(stderr, "                               and a guest whose main returns is simply restarted.\n");
 	fprintf(stderr, "                               Defines the window in guest time, so runs at\n");
 	fprintf(stderr, "                               different speeds stay comparable.\n");
 	fprintf(stderr, "-cachesim-skip n               clear the counters after n frames, to drop the\n");
@@ -56,6 +58,9 @@ static void usage(const char *exe)
 	fprintf(stderr, "-cachesim-lookahead n          bytes fetched past the end of a block (default 0).\n");
 	fprintf(stderr, "                               Calibrated against hardware, see docs/cachesim.\n");
 	fprintf(stderr, "-cachesim-timing               charge modelled miss cycles to the emulated SH4.\n");
+	fprintf(stderr, "-cachesim-timing-pipeline      also drive timing from the pipeline model instead of\n");
+	fprintf(stderr, "                               flycast's per-block estimate. Implies -cachesim-timing.\n");
+	fprintf(stderr, "                               Changes emulated time for every guest, not just misses.\n");
 	fprintf(stderr, "                               Changes how the guest runs, so results from such\n");
 	fprintf(stderr, "                               a run are not comparable with a normal one.\n");
 	fprintf(stderr, "                               Implies -cachesim.\n");
@@ -264,6 +269,13 @@ void parseCommandLine(int argc, const char * const argv[])
 		}
 		if (!strcmp(argv[i], "-cachesim") || !strcmp(argv[i], "--cachesim")) {
 			setTransient("config", "Debug.CacheSim", "yes");
+			continue;
+		}
+		if (!strcmp(argv[i], "-cachesim-timing-pipeline")
+				|| !strcmp(argv[i], "--cachesim-timing-pipeline")) {
+			setTransient("config", "Debug.CacheSim", "yes");
+			setTransient("config", "Debug.CacheSimTiming", "yes");
+			setTransient("config", "Debug.CacheSimTimingPipeline", "yes");
 			continue;
 		}
 		if (!strcmp(argv[i], "-cachesim-timing") || !strcmp(argv[i], "--cachesim-timing")) {

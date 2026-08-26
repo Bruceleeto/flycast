@@ -146,11 +146,15 @@ static State& state()
 // penalty model is configured is the one that gets charged.
 static void chargeCycles(State& st, double cycles)
 {
-	if (!g_timing || cycles <= 0)
+	if (!g_timing || cycles == 0)
 		return;
 	st.chargeRemainder += cycles;
+	// truncation toward zero, so a credit accumulates the same way a charge
+	// does. Pipeline timing (below) hands this negative values: flycast's own
+	// per-block estimate already contains an implicit stall allowance, and
+	// replacing it means giving some of it back.
 	const int whole = (int)st.chargeRemainder;
-	if (whole <= 0)
+	if (whole == 0)
 		return;
 	st.chargeRemainder -= whole;
 	st.chargedCycles += whole;
@@ -266,6 +270,27 @@ void DYNACALL traceBlock(const BlockTrace *bt)
 		st.pipeUnmodelledBlocks++;
 	st.currentBlock = bt->id;
 	st.currentPc = bt->vaddr;
+
+	// Pipeline timing. flycast's own `guestCycles` for this block already
+	// stands in for the pipeline: Sh4Cycles::countCycles charges IssueCycles
+	// per instruction with a dual-issue test on instruction GROUPS only - it
+	// never looks at dependencies - plus a flat 2 cycles for each of the first
+	// three memory operations in a block. That fudge is an implicit stall
+	// allowance, so ADDING modelled stalls on top double-charges. On texture2d
+	// flycast's base is 309,251,840 cycles where hardware ISSUES in
+	// 210,278,945 - 99M cycles of stall time already baked in, before cachesim
+	// charges a single miss.
+	//
+	// So this REPLACES rather than adds: charge the difference between the
+	// pipeline model's schedule for the block and flycast's estimate of it.
+	// Cache and store queue stay separate and additive, which they are - they
+	// are the two things countCycles has no term for at all.
+	//
+	// Modelled against the validation suite as issue + cache + reg + fpu:
+	// texture2d 0.990, pvr_dma 0.983, bruces_balls 1.000, sqmark 0.975,
+	// from a spread of 0.657-1.083 with this off.
+	if (g_pipeTiming && bt->pipeModelled)
+		chargeCycles(st, (double)bt->pipeCycles - (double)bt->guestCycles);
 
 	// Misses are attributed to the block that was fetching when they happened,
 	// which is what makes them addable to a per-function cost
@@ -513,6 +538,7 @@ void frameBoundary()
 	// Timing feedback is a plain runtime check inside a hook that already
 	// exists, so it can be toggled without recompiling anything
 	g_timing = g_armed && config::CacheSimTiming;
+	g_pipeTiming = g_timing && config::CacheSimTimingPipeline;
 
 	const bool dataFeedWanted = config::CacheSim && config::CacheSimData;
 	if (config::CacheSim != g_armed || dataFeedWanted != g_dataFeed)
@@ -537,6 +563,7 @@ void init()
 	// option ticked with the simulator off would slow the guest down for nothing
 	g_dataFeed = config::CacheSim && config::CacheSimData;
 	g_timing = config::CacheSim && config::CacheSimTiming;
+	g_pipeTiming = g_timing && config::CacheSimTimingPipeline;
 	if (g_timing)
 		// Loud, because from here on flycast is not emulating the same machine
 		// it emulates with the option off, and any timing-sensitive result
@@ -643,6 +670,20 @@ void setSkipFrames(u32 frames) { state().skipFrames = frames; }
 void setMeasureFrames(u32 frames) { state().measureFrames = frames; }
 bool finished() { return state().done; }
 u64 chargedTimingCycles() { return state().chargedCycles; }
+
+void reportFinal()
+{
+	State& st = state();
+	if (st.done)
+		return;		// the frame limit already reported; do not print it twice
+	st.done = true;
+	logSummary();
+	logProfile();
+	logBlocks();
+	if (!reportPath.empty())
+		writeReport(reportPath);
+}
+bool g_pipeTiming = false;
 void setMissRingSize(size_t records) { state().model.setMissRingSize(records); }
 void setReportPath(const std::string& path) { reportPath = path; }
 

@@ -159,7 +159,7 @@ static void mainui_headless_loop()
 				MainFrameCount - startFrame, elapsed,
 				elapsed == 0 ? 0.0 : (MainFrameCount - startFrame) / elapsed);
 		if (cachesim::armed())
-			cachesim::logSummary();
+			cachesim::reportFinal();
 		emu.unloadGame();
 	} catch (const FlycastException& e) {
 		ERROR_LOG(BOOT, "Headless: %s", e.what());

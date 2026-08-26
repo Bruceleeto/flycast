@@ -504,6 +504,7 @@ extern Option<std::string, false> CacheSimTrace;
 extern Option<std::string, false> CacheSimSymbols;
 extern Option<bool> CacheSimData;
 extern Option<bool> CacheSimTiming;
+extern Option<bool> CacheSimTimingPipeline;
 
 extern Option<bool> OpenGlChecks;
 

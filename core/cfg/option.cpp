@@ -150,6 +150,7 @@ Option<bool> CacheSimData("Debug.CacheSimData", false);
 // Changes emulated behaviour rather than only observing it, so it stays off
 // unless somebody asks for it by name.
 Option<bool> CacheSimTiming("Debug.CacheSimTiming", false);
+Option<bool> CacheSimTimingPipeline("Debug.CacheSimTimingPipeline", false);
 
 Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 
