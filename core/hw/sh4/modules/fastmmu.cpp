@@ -82,23 +82,39 @@ static u16 bucket_index(u32 address, int size, u32 asid)
 	return ((address >> 20) ^ (address >> 12) ^ (address | asid | (size << 8))) & (NBUCKETS - 1);
 }
 
-static void flush_cache();
-
-static void cache_entry(const TLB_Entry &entry)
+static void add_entry(const TLB_Entry &entry)
 {
-	if (full_table_size >= std::size(full_table))
-		// The table is a lookup accelerator with no eviction: once it fills,
-		// every later mapping becomes invisible to find_entry() and the guest
-		// faults forever. Guests that remap the store queue per scanline fill
-		// it in seconds. Dropping it and repopulating costs a few misses.
-		flush_cache();
-
 	full_table[full_table_size].entry = entry;
 
 	u16 bucket = bucket_index(entry.Address.VPN << 10, entry.Data.SZ1 * 2 + entry.Data.SZ0, entry.Address.ASID);
 	full_table[full_table_size].next_entry = entry_buckets[bucket];
 	entry_buckets[bucket] = &full_table[full_table_size];
 	full_table_size++;
+}
+
+static void cache_entry(const TLB_Entry &entry)
+{
+	if (full_table_size >= std::size(full_table))
+	{
+		// The table has no eviction, so it fills up for any guest that remaps
+		// the store queue often: KOS's sq_lock() rewrites a UTLB entry, and a
+		// per-scanline lock reaches 65536 in a few seconds. Everything added
+		// after that used to be dropped on the floor, so find_entry() never saw
+		// the new mappings again and the guest faulted on them forever.
+		//
+		// Rebuild from the UTLB instead of dropping to empty. Those 64 entries
+		// are the live set, so nothing currently mapped goes missing and no TLB
+		// miss is raised that hardware would not have raised.
+		full_table_size = 0;
+		memset(entry_buckets, 0, sizeof(entry_buckets));
+		// find_entry() hands out pointers into full_table and mmu_full_lookup
+		// parks the last one in lru_entry, which would now alias a reused slot.
+		lru_entry = nullptr;
+		for (const TLB_Entry& live : UTLB)
+			if (live.Data.V != 0)
+				add_entry(live);
+	}
+	add_entry(entry);
 }
 
 static void flush_cache()
