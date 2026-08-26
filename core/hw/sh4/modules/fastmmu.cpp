@@ -82,10 +82,16 @@ static u16 bucket_index(u32 address, int size, u32 asid)
 	return ((address >> 20) ^ (address >> 12) ^ (address | asid | (size << 8))) & (NBUCKETS - 1);
 }
 
+static void flush_cache();
+
 static void cache_entry(const TLB_Entry &entry)
 {
 	if (full_table_size >= std::size(full_table))
-		return;
+		// The table is a lookup accelerator with no eviction: once it fills,
+		// every later mapping becomes invisible to find_entry() and the guest
+		// faults forever. Guests that remap the store queue per scanline fill
+		// it in seconds. Dropping it and repopulating costs a few misses.
+		flush_cache();
 
 	full_table[full_table_size].entry = entry;
 
