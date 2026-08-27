@@ -121,6 +121,7 @@ Option<std::string, false> CacheSimTrace("");
 Option<std::string, false> CacheSimSymbols("");
 Option<bool> CacheSimData("", false);
 Option<bool> CacheSimTiming("", false);
+Option<bool> CacheSimTimingPipeline("", false);
 
 //Option<std::vector<std::string>, false> ContentPath("");
 //Option<bool, false> HideLegacyNaomiRoms("", true);
