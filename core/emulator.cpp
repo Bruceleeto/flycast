@@ -51,6 +51,7 @@
 #include "hw/sh4/dyna/ngen.h"
 #include "oslib/i18n.h"
 #include "hw/sh4/cachesim/cachesim.h"
+#include "hw/gdrom/g1ata.h"
 
 settings_t settings;
 constexpr char const *BIOS_TITLE = "Dreamcast BIOS";
@@ -592,6 +593,29 @@ void Emulator::loadGame(const char *path, LoadProgress *progress)
 		setPlatform(getGamePlatform(settings.content.fileName));
 		mem_map_default();
 
+		// A console with an IDE mod has a second drive on the G1 bus. Homebrew
+		// built for one reads its data from /ide, so look for a disk image
+		// beside the content and attach it if it is there. Named after the
+		// content when possible, so several games can sit in one folder, with
+		// a plain ide.img as the shared fallback.
+		if (!settings.content.path.empty())
+		{
+			const std::string named = get_file_basename(settings.content.path) + ".img";
+			const size_t slash = settings.content.path.find_last_of("/\\");
+			const std::string shared = (slash == std::string::npos
+					? std::string() : settings.content.path.substr(0, slash + 1)) + "ide.img";
+			const std::string dir = (slash == std::string::npos
+					? std::string() : settings.content.path.substr(0, slash + 1)) + "ide";
+			// A directory wins over an image: it needs no packing step, so it
+			// is the one that stays in sync with what you just edited.
+			if (file_exists(dir))
+				g1ata::init(dir);
+			else if (file_exists(named))
+				g1ata::init(named);
+			else if (file_exists(shared))
+				g1ata::init(shared);
+		}
+
 		config::Settings::instance().reset();
 		config::Settings::instance().load(false);
 		dc_reset(true);
@@ -775,6 +799,7 @@ void Emulator::unloadGame()
 void Emulator::term()
 {
 	cachesim::term();
+	g1ata::term();
 
 	unloadGame();
 	if (state == Init)

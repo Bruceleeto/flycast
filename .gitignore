@@ -21,3 +21,4 @@ core/deps/glslang/
 compile_commands.json
 CMakeUserPresets.json
 docs/
+build-cachesweep/

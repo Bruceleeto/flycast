@@ -12,6 +12,7 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/sh4/sh4_mmr.h"
 #include "hw/sh4/sh4_sched.h"
+#include "g1ata.h"
 #include "imgread/common.h"
 #include "serialize.h"
 
@@ -1040,6 +1041,11 @@ static void gd_process_spi_cmd()
 //Read handler
 u32 ReadMem_gdrom(u32 Addr, u32 sz)
 {	
+	// The ATA drive shares this register file with us and answers whenever the
+	// guest has the slave selected.
+	if (g1ata::selected())
+		return g1ata::readReg(Addr, sz);
+
 	switch (Addr)
 	{
 		//cancel interrupt
@@ -1118,6 +1124,16 @@ u32 ReadMem_gdrom(u32 Addr, u32 sz)
 //Write Handler
 void WriteMem_gdrom(u32 Addr, u32 data, u32 sz)
 {
+	// Device select has to reach both devices, since it is what decides which
+	// of them the next access belongs to.
+	if (Addr == GD_DRVSEL && g1ata::present())
+		g1ata::writeReg(Addr, data, sz);
+	if (g1ata::selected() && Addr != GD_DRVSEL)
+	{
+		g1ata::writeReg(Addr, data, sz);
+		return;
+	}
+
 	switch(Addr)
 	{
 	//ATA_IOPORT_WR_CYLINDER_LOW
@@ -1320,6 +1336,9 @@ static void GDROM_DmaStart(u32 addr, u32 data)
 		SB_GDSTARD = SB_GDSTAR;
 		SB_GDLEND = 0;
 		DEBUG_LOG(GDROM, "GDROM-DMA start addr %08X len %d fad %x", SB_GDSTAR, SB_GDLEN, read_params.start_sector);
+
+		if (g1ata::dmaStart())
+			return;
 
 		int ticks = getGDROMTicks();
 		if (ticks < SH4_TIMESLICE)
