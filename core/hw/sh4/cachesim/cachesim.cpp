@@ -839,9 +839,18 @@ const BlockTrace *traceForBlock(u32 vaddr, u32 paddr, u32 size, u32 guestCycles)
 		// a pool slot and nothing else
 	}
 	// std::deque so that the raw pointers baked into compiled code stay valid
-	// as the pool grows
-	st.blockPool.push_back({ vaddr, paddr, size, (u32)st.blockPool.size(), guestCycles,
-			0, 0, {}, false, hash });
+	// as the pool grows. Fields are named rather than positional: the pipeline
+	// members sit between the identity ones and the hash, so a positional list
+	// silently lands the hash in pipeWrapStalls and leaves hash zero, which
+	// makes the identity check above never match.
+	BlockTrace trace{};
+	trace.vaddr = vaddr;
+	trace.paddr = paddr;
+	trace.size = size;
+	trace.id = (u32)st.blockPool.size();
+	trace.guestCycles = guestCycles;
+	trace.hash = hash;
+	st.blockPool.push_back(trace);
 	analyzeBlockPipeline(code, st.blockPool.back());
 	return &st.blockPool.back();
 }
