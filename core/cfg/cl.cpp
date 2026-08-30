@@ -67,6 +67,34 @@ static void usage(const char *exe)
 	fprintf(stderr, "-cachesim-data                 also model the operand cache. Costs a call per\n");
 	fprintf(stderr, "                               guest load and store, so it is off by default.\n");
 	fprintf(stderr, "                               Implies -cachesim.\n");
+	fprintf(stderr, "-jitdump-region ADDR:SIZE      dump this range of guest memory, and log every\n");
+	fprintf(stderr, "                               entry into it. e.g. 0x8c400000:0x100000.\n");
+	fprintf(stderr, "                               Writes <out>.bin, the raw bytes, and\n");
+	fprintf(stderr, "                               <out>.entries, one record per entry. What those\n");
+	fprintf(stderr, "                               bytes mean is left to the offline tool: see\n");
+	fprintf(stderr, "                               docs/jitdump.md for the file layout.\n");
+	fprintf(stderr, "-jitdump-out prefix            write <prefix>.bin and <prefix>.entries there.\n");
+	fprintf(stderr, "                               Default 'jitdump'.\n");
+	fprintf(stderr, "-jitdump-skip n                guest frames of warm-up before logging (300).\n");
+	fprintf(stderr, "-jitdump-interval n            also write a numbered <prefix>.NNNN.bin every n\n");
+	fprintf(stderr, "                               frames, to see the code region evolve.\n");
+	fprintf(stderr, "-jitdump-max-entries n         stop logging after n entries (16M). 0 for no cap;\n");
+	fprintf(stderr, "                               a record is 16 bytes and they come fast.\n");
+	fprintf(stderr, "-jitdump-no-entries            dump the region only. This is the only mode that\n");
+	fprintf(stderr, "                               works under the dynarec: the entry log is fed per\n");
+	fprintf(stderr, "                               instruction, so -jitdump-region otherwise selects\n");
+	fprintf(stderr, "                               interpreter for you.\n");
+	fprintf(stderr, "-watch-write ADDR:SIZE         log every SH4 store into this range: the PC that\n");
+	fprintf(stderr, "                               stored, the address, the value, the size and the\n");
+	fprintf(stderr, "                               cycle. Writes <out>.writes.\n");
+	fprintf(stderr, "-watch-badjump ADDR:SIZE       log every jump that leaves this range, with the\n");
+	fprintf(stderr, "                               instruction it left from and where it went.\n");
+	fprintf(stderr, "                               Writes <out>.jumps.\n");
+	fprintf(stderr, "-watch-out prefix              where the watch logs go. Default 'watch'.\n");
+	fprintf(stderr, "-watch-max n                   stop after n records (4M). 0 for no cap.\n");
+	fprintf(stderr, "                               Both watchpoints need the interpreter, and\n");
+	fprintf(stderr, "                               select it the way -jitdump-region does. A range\n");
+	fprintf(stderr, "                               matches through any mirror of the same address.\n");
 	fprintf(stderr, "-help                          display this help\n");
 }
 
@@ -241,6 +269,26 @@ void parseCommandLine(int argc, const char * const argv[])
 {
 	settings.content.path.clear();
 	const char *exe = argv[0];
+	// The entry log is fed one instruction at a time by the interpreter, so
+	// asking for it is asking for the interpreter. Decided before the main
+	// pass rather than after it, so that an explicit -config Dynarec.Enabled
+	// still overrides it.
+	{
+		bool jitdump = false;
+		bool entries = true;
+		for (int i = 1; i < argc; i++)
+		{
+			const char *arg = argv[i];
+			if (arg[0] == '-' && arg[1] == '-')
+				arg++;
+			if (!strncmp(arg, "-jitdump", 8) || !strncmp(arg, "-watch-", 7))
+				jitdump = true;
+			if (!strcmp(arg, "-jitdump-no-entries"))
+				entries = false;
+		}
+		if (jitdump && entries)
+			setTransient("config", "Dynarec.Enabled", "no");
+	}
 	for (int i = 1; i < argc; i++)
 	{
 		if (!strcmp(argv[i], "-help") || !strcmp(argv[i], "--help")) {
@@ -312,6 +360,49 @@ void parseCommandLine(int argc, const char * const argv[])
 		if (optionValue(argc, argv, i, "-cachesim-report", value)) {
 			setTransient("config", "Debug.CacheSim", "yes");
 			setTransient("config", "Debug.CacheSimReport", value);
+			continue;
+		}
+		if (!strcmp(argv[i], "-jitdump-no-entries") || !strcmp(argv[i], "--jitdump-no-entries")) {
+			setTransient("config", "Debug.JitDump", "yes");
+			setTransient("config", "Debug.JitDumpEntries", "no");
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-jitdump-out", value)) {
+			setTransient("config", "Debug.JitDump", "yes");
+			setTransient("config", "Debug.JitDumpOut", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-jitdump-region", value)) {
+			setTransient("config", "Debug.JitDump", "yes");
+			setTransient("config", "Debug.JitDumpRegion", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-jitdump-skip", value)) {
+			setTransient("config", "Debug.JitDumpSkipFrames", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-jitdump-interval", value)) {
+			setTransient("config", "Debug.JitDumpInterval", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-jitdump-max-entries", value)) {
+			setTransient("config", "Debug.JitDumpMaxEntries", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-watch-write", value)) {
+			setTransient("config", "Debug.WatchWrite", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-watch-badjump", value)) {
+			setTransient("config", "Debug.WatchBadJump", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-watch-out", value)) {
+			setTransient("config", "Debug.WatchOut", value);
+			continue;
+		}
+		if (optionValue(argc, argv, i, "-watch-max", value)) {
+			setTransient("config", "Debug.WatchMaxRecords", value);
 			continue;
 		}
 		if (!strcmp(argv[i], "-config") || !strcmp(argv[i], "--config"))

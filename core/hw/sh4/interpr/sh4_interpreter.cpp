@@ -14,6 +14,8 @@
 #include "debug/gdb_server.h"
 #include "../sh4_cycles.h"
 #include "hw/sh4/cachesim/cachesim.h"
+#include "hw/sh4/jitdump/jitdump.h"
+#include "hw/sh4/jitdump/watch.h"
 
 Sh4ICache icache;
 Sh4OCache ocache;
@@ -45,6 +47,11 @@ u16 Sh4Interpreter::ReadNexOp()
 		if (!mmu_enabled() || mmu_instruction_translation(addr, physAddr) == MmuError::NONE)
 			cachesim::traceFetch(addr, physAddr, 2);
 	}
+
+	if (jitdump::active())
+		jitdump::traceFetch(addr);
+	if (watch::jumpArmed())
+		watch::traceFetch(addr);
 
 	ctx->pc = addr + 2;
 

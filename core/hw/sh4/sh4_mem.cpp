@@ -5,6 +5,7 @@
 #include "types.h"
 
 #include "sh4_mem.h"
+#include "jitdump/watch.h"
 #include "hw/holly/sb_mem.h"
 #include "sh4_mmr.h"
 #include "hw/pvr/elan.h"
@@ -316,6 +317,7 @@ void SetMemoryHandlers()
 		WriteMem32 = &WriteCachedMem<u32>;
 		WriteMem64 = &WriteCachedMem<u64>;
 
+		watch::installHandlers();
 		return;
 	}
 	interpreterRunning = false;
@@ -346,4 +348,5 @@ void SetMemoryHandlers()
 		WriteMem32 = &addrspace::write32;
 		WriteMem64 = &addrspace::write64;
 	}
+	watch::installHandlers();
 }

@@ -152,6 +152,24 @@ Option<bool> CacheSimData("Debug.CacheSimData", false);
 Option<bool> CacheSimTiming("Debug.CacheSimTiming", false);
 Option<bool> CacheSimTimingPipeline("Debug.CacheSimTimingPipeline", false);
 
+Option<bool> JitDump("Debug.JitDump", false);
+Option<std::string, false> JitDumpOut("Debug.JitDumpOut");
+// The range to dump, as "0xADDR:SIZE". Required: flycast has no way to know
+// which pages hold generated code, and no business guessing.
+Option<std::string, false> JitDumpRegion("Debug.JitDumpRegion");
+Option<bool> JitDumpEntries("Debug.JitDumpEntries", true);
+// Guest frames of warm-up before logging starts, to keep the boot out of it.
+Option<int> JitDumpSkipFrames("Debug.JitDumpSkipFrames", 300);
+Option<int> JitDumpInterval("Debug.JitDumpInterval", 0);
+// 16 bytes a record, so the default caps the entry log at 256 MB. 0 for no cap.
+Option<int> JitDumpMaxEntries("Debug.JitDumpMaxEntries", 16000000);
+
+// Ranges as "0xADDR:SIZE". Empty leaves the watchpoint off.
+Option<std::string, false> WatchWrite("Debug.WatchWrite");
+Option<std::string, false> WatchBadJump("Debug.WatchBadJump");
+Option<std::string, false> WatchOut("Debug.WatchOut");
+Option<int> WatchMaxRecords("Debug.WatchMaxRecords", 4000000);
+
 Option<bool> OpenGlChecks("OpenGlChecks", false, "validate");
 
 Option<std::vector<std::string>, false> ContentPath("Dreamcast.ContentPath");

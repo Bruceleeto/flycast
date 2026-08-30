@@ -10,6 +10,10 @@ target_sources(${PROJECT_NAME} PRIVATE
         cachesim/pipesim.cpp
         cachesim/pipesim.h
         cachesim/pipesim_optable.h
+        jitdump/jitdump.cpp
+        jitdump/jitdump.h
+        jitdump/watch.cpp
+        jitdump/watch.h
         dyna/blockmanager.cpp
         dyna/blockmanager.h
         dyna/decoder.cpp

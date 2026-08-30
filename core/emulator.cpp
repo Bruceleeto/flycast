@@ -51,6 +51,8 @@
 #include "hw/sh4/dyna/ngen.h"
 #include "oslib/i18n.h"
 #include "hw/sh4/cachesim/cachesim.h"
+#include "hw/sh4/jitdump/jitdump.h"
+#include "hw/sh4/jitdump/watch.h"
 #include "hw/gdrom/g1ata.h"
 
 settings_t settings;
@@ -503,6 +505,8 @@ static void setPlatform(int platform)
 void Emulator::init()
 {
 	cachesim::init();
+	jitdump::init();
+	watch::init();
 
 	if (state != Uninitialized)
 	{
@@ -772,6 +776,9 @@ void Emulator::unloadGame()
 	try {
 		stop();
 	} catch (...) { }
+	// Before the game goes away: the dump is read out of guest RAM
+	jitdump::finish();
+	watch::finish();
 	if (state == Loaded || state == Error)
 	{
 #ifndef LIBRETRO
@@ -799,6 +806,8 @@ void Emulator::unloadGame()
 void Emulator::term()
 {
 	cachesim::term();
+	jitdump::term();
+	watch::term();
 	g1ata::term();
 
 	unloadGame();
@@ -1115,6 +1124,7 @@ void Emulator::vblank()
 {
 	if (cachesim::armed())
 		cachesim::frameBoundary();
+	jitdump::frameBoundary();
 
 	EventManager::event(Event::VBlank);
 	runner.execTasks();

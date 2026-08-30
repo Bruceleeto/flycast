@@ -505,6 +505,20 @@ extern Option<std::string, false> CacheSimSymbols;
 extern Option<bool> CacheSimData;
 extern Option<bool> CacheSimTiming;
 extern Option<bool> CacheSimTimingPipeline;
+// Guest code dumper: writes a range of guest memory out, and logs every entry
+// into it. See core/hw/sh4/jitdump/jitdump.h and docs/jitdump.md.
+extern Option<bool> JitDump;
+extern Option<std::string, false> JitDumpOut;
+extern Option<std::string, false> JitDumpRegion;
+extern Option<bool> JitDumpEntries;
+extern Option<int> JitDumpSkipFrames;
+extern Option<int> JitDumpInterval;
+extern Option<int> JitDumpMaxEntries;
+// Guest watchpoints. See core/hw/sh4/jitdump/watch.h.
+extern Option<std::string, false> WatchWrite;
+extern Option<std::string, false> WatchBadJump;
+extern Option<std::string, false> WatchOut;
+extern Option<int> WatchMaxRecords;
 
 extern Option<bool> OpenGlChecks;
 
