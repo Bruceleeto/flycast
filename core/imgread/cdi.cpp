@@ -80,24 +80,9 @@ Disc* cdi_parse(const char* file, std::vector<u8> *digest)
 
 					image.header_position = fsource->tell();
 
-					// Show info
-#if 0
-					printf("Saving  ");
-					printf("Track: %2d  ",track.global_current_track);
-					printf("Type: ");
-					switch(track.mode)
-					{
-					case 0 : printf("Audio/"); break;
-					case 1 : printf("Mode1/"); break;
-					case 2 :
-					default: printf("Mode2/"); break;
-					}
-					printf("%lu  ",track.sector_size);
-
-					printf("Pregap: %-3ld  ",track.pregap_length);
-					printf("Size: %-6ld  ",track.length);
-					printf("LBA: %-6ld  ",track.start_lba);
-#endif
+					NOTICE_LOG(GDROM, "CDI track %d: mode %d sector %lu pregap %ld length %ld total %ld lba %ld",
+							track.global_current_track, track.mode, track.sector_size, track.pregap_length,
+							track.length, track.total_length, track.start_lba);
 					if (ft)
 					{
 						ft = false;
@@ -125,7 +110,15 @@ Disc* cdi_parse(const char* file, std::vector<u8> *digest)
 						WARN_LOG(GDROM, "Cannot re-open file '%s' errno %d", file, errno);
 						throw FlycastException(i18n::Ts("Cannot re-open CDI file"));
 					}
-					t.file = new RawTrackFile(trackFile, track.position + track.pregap_length * track.sector_size, t.StartFAD, track.sector_size);
+					// The image holds the pregap sectors too: keep them readable, some discs put data there
+					if (track.pregap_length > 0 && track.total_length >= track.length + track.pregap_length)
+					{
+						t.PregapFAD = track.start_lba;
+						t.file = new RawTrackFile(trackFile, track.position, t.PregapFAD, track.sector_size);
+					}
+					else {
+						t.file = new RawTrackFile(trackFile, track.position + track.pregap_length * track.sector_size, t.StartFAD, track.sector_size);
+					}
 
 					rv->tracks.push_back(t);
 
@@ -162,7 +155,8 @@ Disc* cdi_parse(const char* file, std::vector<u8> *digest)
 
 		rv->type=GuessDiscType(CD_M1,CD_M2,CD_DA);
 
-		rv->LeadOut.StartFAD = rv->EndFAD;
+		// the lead-out starts on the sector after the last one of the disc
+		rv->LeadOut.StartFAD = rv->EndFAD + 1;
 		rv->LeadOut.ADR = 1;
 		rv->LeadOut.CTRL = 4;
 

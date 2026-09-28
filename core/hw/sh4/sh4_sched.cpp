@@ -31,6 +31,7 @@ struct sched_list
 };
 
 static u64 sh4_sched_ffb;
+int sh4SliceLength = SH4_TIMESLICE;
 static std::vector<sched_list> sch_list;
 static int sh4_sched_next_id = -1;
 

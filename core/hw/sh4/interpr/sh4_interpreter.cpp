@@ -13,17 +13,34 @@
 #include "../sh4_cache.h"
 #include "debug/gdb_server.h"
 #include "../sh4_cycles.h"
+#include <algorithm>
+
+static int UpdateSystemSlice(int slice);
+#include "../sh4_trace.h"
 
 Sh4ICache icache;
 Sh4OCache ocache;
+#if SH4_TRACE
+static const bool ocacheTraceHook = (sh4trace::ocacheAddrArray = [](u32 a) { return ocache.ReadAddressArray(a); },
+		sh4trace::ocacheLineData = [](u32 i) { return ocache.lineData(i); },
+		sh4trace::icacheAddrArray = [](u32 a) { return icache.ReadAddressArray(a); },
+		sh4trace::icacheLineData = [](u32 i) { return icache.lineData(i); }, true);
+#endif
 Sh4Interpreter *Sh4Interpreter::Instance;
 
 void Sh4Interpreter::ExecuteOpcode(u16 op)
 {
+#if SH4_TRACE
+	sh4trace::step(ctx->pc - 2, op);
+#endif
 	if (ctx->sr.FD == 1 && OpDesc[op]->IsFloatingPoint())
 		throw SH4ThrownException(ctx->pc - 2, Sh4Ex_FpuDisabled);
+	// Count the instruction before running it so that a branch issues before its delay slot
+	bool taken = false;
+	if ((op & 0xf900) == 0x8900)	// bt, bf, bt/s, bf/s
+		taken = ctx->sr.T == ((op & 0x0200) == 0 ? 1u : 0u);
+	sh4cycles.executeCycles(op, taken);
 	OpPtr[op](ctx, op);
-	sh4cycles.executeCycles(op);
 }
 
 u16 Sh4Interpreter::ReadNexOp()
@@ -53,8 +70,12 @@ void Sh4Interpreter::Run()
 
 					ExecuteOpcode(op);
 				} while (ctx->cycle_counter > 0);
-				ctx->cycle_counter += SH4_TIMESLICE;
-				UpdateSystem_INTC();
+				ctx->cycle_counter += sh4SliceLength;
+				UpdateSystemSlice(sh4SliceLength);
+				// end the next slice when the next scheduled event is due
+				const int next = std::clamp(Sh4cntx.sh4_sched_next, 1, SH4_TIMESLICE);
+				ctx->cycle_counter += next - sh4SliceLength;
+				sh4SliceLength = next;
 			} catch (const SH4ThrownException& ex) {
 				Do_Exception(ex.epc, ex.expEvn);
 				// an exception requires the instruction pipeline to drain, so approx 5 cycles
@@ -125,6 +146,7 @@ void Sh4Interpreter::Reset(bool hard)
 	ocache.Reset(hard);
 	sh4cycles.reset();
 	ctx->cycle_counter = SH4_TIMESLICE;
+	sh4SliceLength = SH4_TIMESLICE;
 
 	INFO_LOG(INTERPRETER, "Sh4 Reset");
 }
@@ -134,12 +156,45 @@ bool Sh4Interpreter::IsCpuRunning()
 	return ctx->CpuRunning;
 }
 
-//TODO : Check for valid delayslot instruction
+// SH7750 HW manual 5.6.3 (10): instructions that raise a slot illegal instruction exception
+// when decoded in a delay slot. Undefined opcodes already throw Sh4Ex_IllegalInstr, which
+// AdjustDelaySlotException converts. Privileged instructions in user mode aren't checked here.
+static bool isIllegalInDelaySlot(u16 op)
+{
+	switch (op >> 12)
+	{
+	case 0x0:
+		return (op & 0xf0ff) == 0x0023	// braf
+			|| (op & 0xf0ff) == 0x0003	// bsrf
+			|| op == 0x000b				// rts
+			|| op == 0x002b;			// rte
+	case 0x4:
+		return (op & 0xf0ff) == 0x402b	// jmp
+			|| (op & 0xf0ff) == 0x400b	// jsr
+			|| (op & 0xf0ff) == 0x400e	// ldc Rm,SR
+			|| (op & 0xf0ff) == 0x4007;	// ldc.l @Rm+,SR
+	case 0x8:
+		return (op & 0xf900) == 0x8900;	// bt, bf, bt/s, bf/s
+	case 0x9:	// mov.w @(disp,PC),Rn
+	case 0xa:	// bra
+	case 0xb:	// bsr
+	case 0xd:	// mov.l @(disp,PC),Rn
+		return true;
+	case 0xc:
+		return (op & 0xff00) == 0xc300	// trapa
+			|| (op & 0xff00) == 0xc700;	// mova
+	default:
+		return false;
+	}
+}
+
 void Sh4Interpreter::ExecuteDelayslot()
 {
 	try {
 		u32 op = ReadNexOp();
 
+		if (isIllegalInDelaySlot(op))
+			throw SH4ThrownException(ctx->pc - 2, Sh4Ex_IllegalInstr);
 		ExecuteOpcode(op);
 	} catch (SH4ThrownException& ex) {
 		AdjustDelaySlotException(ex);
@@ -169,6 +224,18 @@ void Sh4Interpreter::ExecuteDelayslot_RTE()
 		ctx->pc -= 2;	// break on previous instruction
 		throw e;
 	}
+}
+
+// at the end of each interpreter slice
+static int UpdateSystemSlice(int slice)
+{
+	Sh4cntx.sh4_sched_next -= slice;
+	if (Sh4cntx.sh4_sched_next < 0)
+		sh4_sched_tick(slice);
+	if (Sh4cntx.interrupt_pend)
+		return UpdateINTC();
+	else
+		return 0;
 }
 
 // every SH4_TIMESLICE cycles

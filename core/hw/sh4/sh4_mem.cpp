@@ -1,3 +1,4 @@
+#include <algorithm>
 /*
 	Mostly buggy, old, glue code that somehow still works
 	Most of the work is now delegated on vtlb and only helpers are here
@@ -5,6 +6,7 @@
 #include "types.h"
 
 #include "sh4_mem.h"
+#include "sh4_trace.h"
 #include "hw/holly/sb_mem.h"
 #include "sh4_mmr.h"
 #include "hw/pvr/elan.h"
@@ -34,10 +36,12 @@ WriteMem64Func WriteMem64;
 
 //AREA 1
 static addrspace::handler area1_32b;
+static addrspace::handler area1_64b;
 
 static void map_area1_init()
 {
 	area1_32b = addrspaceRegisterHandlerTemplate(pvr_read32p, pvr_write32p);
+	area1_64b = addrspaceRegisterHandlerTemplate(pvr_read64p, pvr_write64p);
 }
 
 static void map_area1(u32 base)
@@ -46,7 +50,11 @@ static void map_area1(u32 base)
 	
 	//Lower 32 mb map
 	//64b interface
-	addrspace::mapBlock(&vram[0], 0x04 | base, 0x04 | base, VRAM_MASK);
+	if (VRAM_SIZE == 0x800000)
+		// 8 MB: the upper half of the 16 MB window is not decoded (no mirror), so it can't be a plain block
+		addrspace::mapHandler(area1_64b, 0x04 | base, 0x04 | base);
+	else
+		addrspace::mapBlock(&vram[0], 0x04 | base, 0x04 | base, VRAM_MASK);
 	//32b interface
 	addrspace::mapHandler(area1_32b, 0x05 | base, 0x05 | base);
 	
@@ -203,12 +211,35 @@ void mem_Term()
 
 void WriteMemBlock_nommu_dma(u32 dst, u32 src, u32 size)
 {
+#if SH4_TRACE
+	sh4trace::word0Block("blockdma", dst, size);
+#endif
+	// split at 64 KB boundaries of either side so transfers wrap around memory mirrors (see below)
+	const u32 room = std::min(0x10000 - (dst & 0xffff), 0x10000 - (src & 0xffff));
+	if (size > room)
+	{
+		while (size > 0)
+		{
+			const u32 chunk = std::min({ size, 0x10000 - (dst & 0xffff), 0x10000 - (src & 0xffff) });
+			WriteMemBlock_nommu_dma(dst, src, chunk);
+			dst += chunk;
+			src += chunk;
+			size -= chunk;
+		}
+		return;
+	}
+#if SH4_TRACE
+	sh4trace::dmaWrite("dmac", dst, size);
+#endif
 	bool dst_ismem, src_ismem;
 	void* dst_ptr = addrspace::writeConst(dst, dst_ismem, 4);
 	void* src_ptr = addrspace::readConst(src, src_ismem, 4);
 
 	if (dst_ismem && src_ismem)
 	{
+#if SH4_TRACE
+		sh4trace::targetBlock("DMAC", dst, src_ptr, size);
+#endif
 		memcpy(dst_ptr, src_ptr, size);
 	}
 	else if (src_ismem)
@@ -225,6 +256,28 @@ void WriteMemBlock_nommu_dma(u32 dst, u32 src, u32 size)
 
 void WriteMemBlock_nommu_ptr(u32 dst, const u32 *src, u32 size)
 {
+#if SH4_TRACE
+	sh4trace::word0Block("blockptr", dst, size);
+#endif
+	// A block may cross the end of a memory mirror (e.g. system RAM ends at 0x0d000000 and wraps to
+	// 0x0c000000): resolve each 64 KB piece separately so the write wraps like the hardware does.
+	if (size > 0 && ((dst & 0xffff) + size) > 0x10000)
+	{
+		const u8 *s = (const u8 *)src;
+		while (size > 0)
+		{
+			const u32 chunk = std::min(size, 0x10000 - (dst & 0xffff));
+			WriteMemBlock_nommu_ptr(dst, (const u32 *)s, chunk);
+			dst += chunk;
+			s += chunk;
+			size -= chunk;
+		}
+		return;
+	}
+#if SH4_TRACE
+	sh4trace::dmaWrite("block", dst, size);
+	sh4trace::targetBlock("BLOCK", dst, src, size);
+#endif
 	bool dst_ismem;
 
 	void* dst_ptr = addrspace::writeConst(dst, dst_ismem, 4);
@@ -259,6 +312,12 @@ void WriteMemBlock_nommu_ptr(u32 dst, const u32 *src, u32 size)
 
 void WriteMemBlock_nommu_sq(u32 dst, const SQBuffer *src)
 {
+#if SH4_TRACE
+	sh4trace::word0Block("sq", dst, 32);
+#endif
+#if SH4_TRACE
+	sh4trace::targetBlock("STORE QUEUE", dst, src, sizeof(SQBuffer));
+#endif
 	// destination address is 32-byte aligned
 	SQBuffer *pdst = (SQBuffer *)GetMemPtr(dst, sizeof(SQBuffer));
 	if (pdst != nullptr)

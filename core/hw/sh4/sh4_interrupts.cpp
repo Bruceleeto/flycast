@@ -16,6 +16,9 @@
 #include "oslib/oslib.h"
 #include "debug/gdb_server.h"
 #include "serialize.h"
+#include "sh4_trace.h"
+#include "modules/mmu.h"
+#include "sh4_mem.h"
 #include <cassert>
 
 //these are fixed
@@ -183,6 +186,11 @@ void ResetInterruptMask(InterruptID intr)
 
 static void Do_Interrupt(Sh4ExceptionCode intEvn)
 {
+#if SH4_TRACE
+	sh4trace::interrupt(intEvn);
+	if (sh4trace::limit(intEvn, 16))
+		WARN_LOG(INTERPRETER, "interrupt %x at pc %08x sr %08x vbr %08x", intEvn, Sh4cntx.pc, Sh4cntx.sr.getFull(), Sh4cntx.vbr);
+#endif
 	CCN_INTEVT = intEvn;
 
 	Sh4cntx.ssr = Sh4cntx.sr.getFull();
@@ -200,9 +208,83 @@ void Do_Exception(u32 epc, Sh4ExceptionCode expEvn)
 {
 	assert((expEvn >= Sh4Ex_TlbMissRead && expEvn <= Sh4Ex_SlotIllegalInstr)
 			|| expEvn == Sh4Ex_FpuDisabled || expEvn == Sh4Ex_SlotFpuDisabled || expEvn == Sh4Ex_UserBreak);
-	if (Sh4cntx.sr.BL != 0)
-		throw FlycastException("Fatal: SH4 exception when blocked");
+	if (Sh4cntx.sr.BL != 0 && expEvn != Sh4Ex_UserBreak)
+	{
+		// SH7750 HW manual 5.5.3: a general exception while SR.BL=1 causes a manual reset
+		WARN_LOG(INTERPRETER, "SH4 exception %x at pc %08x while BL=1 (sr %08x vbr %08x pr %08x): manual reset",
+				expEvn, epc, Sh4cntx.sr.getFull(), Sh4cntx.vbr, Sh4cntx.pr);
+#if SH4_TRACE
+		{
+			static int bldumps;
+			if (++bldumps <= 2)
+				sh4trace::dumpRing("exception while BL=1");
+		}
+#endif
+#if SH4_TRACE
+		if (sh4trace::limit(0xc4001, 6))
+		{
+			// state that a manual reset keeps: MMU registers, TLB, low RAM holding the stub and jump target
+			static int pass;
+			pass++;
+			WARN_LOG(SH4, "RESETPASS %d: epc %08x pr %08x MMUCR %08x PTEH %08x PTEL %08x PTEA %08x TTB %08x TEA %08x CCR %08x 2c %08x",
+					pass, epc, Sh4cntx.pr, CCN_MMUCR.reg_data, CCN_PTEH.reg_data, CCN_PTEL.reg_data, CCN_PTEA.reg_data,
+					CCN_TTB, CCN_TEA, CCN_CCR.reg_data, addrspace::read32(0xff00002c));
+			WARN_LOG(SH4, "RESETPASS %d: r0-7 %08x %08x %08x %08x %08x %08x %08x %08x", pass, Sh4cntx.r[0], Sh4cntx.r[1],
+					Sh4cntx.r[2], Sh4cntx.r[3], Sh4cntx.r[4], Sh4cntx.r[5], Sh4cntx.r[6], Sh4cntx.r[7]);
+			for (int i = 0; i < 64; i++)
+				if (UTLB[i].Data.V)
+					WARN_LOG(SH4, "RESETPASS %d: UTLB[%02d] PTEH %08x PTEL %08x PTEA %08x", pass, i,
+							UTLB[i].Address.reg_data, UTLB[i].Data.reg_data, UTLB[i].Assistance.reg_data);
+			for (int i = 0; i < 4; i++)
+				if (ITLB[i].Data.V)
+					WARN_LOG(SH4, "RESETPASS %d: ITLB[%d] PTEH %08x PTEL %08x", pass, i,
+							ITLB[i].Address.reg_data, ITLB[i].Data.reg_data);
+			for (u32 a = 0x0c000000; a < 0x0c000080; a += 32)
+			{
+				const u32 *m = (const u32 *)GetMemPtr(a, 32);
+				WARN_LOG(SH4, "RESETPASS %d: %08x: %08x %08x %08x %08x %08x %08x %08x %08x", pass, a,
+						m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+			}
+			if (pass >= 2)
+				sh4trace::dumpRing("reset pass");
+		}
+		if (sh4trace::limit(0xc7004, 3))
+			sh4trace::snapshot("manual_reset", epc, 0);
+		if (sh4trace::limit(0xc4000, 2))
+		{
+			sh4trace::dumpLowIcache("manual reset");
+			sh4trace::dumpLowOcache("manual reset");
+			WARN_LOG(SH4, "manual reset: CCR %08x MMUCR %08x", CCN_CCR.reg_data, CCN_MMUCR.reg_data);
+		}
+#endif
+		CCN_EXPEVT = 0x020;
+		Sh4cntx.vbr = 0;
+		Sh4cntx.sr.MD = 1;
+		Sh4cntx.sr.RB = 1;
+		Sh4cntx.sr.BL = 1;
+		Sh4cntx.sr.FD = 0;
+		Sh4cntx.sr.IMASK = 0xf;
+		UpdateSR();
+		// Initialize_CPU(): FPSCR takes its reset value
+		Sh4cntx.fpscr.full = 0x00040001;
+		Sh4Context::UpdateFPSCR(&Sh4cntx);
+		// Initialize_Module(Manual)
+		sh4_mmr_manual_reset();
+		Sh4cntx.pc = 0xA0000000;
+		return;
+	}
 	CCN_EXPEVT = expEvn;
+#if SH4_TRACE
+	if ((expEvn == 0x40 || expEvn == 0x60) && sh4trace::limit(0x70000, 2))
+	{
+		sh4trace::dumpRing("TLB miss exception");
+		sh4trace::followJumps = 400;
+	}
+#endif
+#if SH4_TRACE
+	if (sh4trace::limit(0x10000 | expEvn, 32))
+		WARN_LOG(INTERPRETER, "exception %x at pc %08x sr %08x vbr %08x", expEvn, epc, Sh4cntx.sr.getFull(), Sh4cntx.vbr);
+#endif
 
 	Sh4cntx.ssr = Sh4cntx.sr.getFull();
 	Sh4cntx.spc = epc;

@@ -262,6 +262,13 @@ int main(int argc, char *argv[])
 
 bool UTLB_Sync(u32 entry)
 {
+	{
+		static int logged;
+		if (++logged <= 256)
+			WARN_LOG(SH4, "UTLB[%2d] <- addr %08x data %08x assist %08x  pc %08x AT %d", entry,
+					UTLB[entry].Address.reg_data, UTLB[entry].Data.reg_data, UTLB[entry].Assistance.reg_data,
+					Sh4cntx.pc - 2, CCN_MMUCR.AT);
+	}
 	mmuStrictCacheFlush();
 	mmuITransCacheFlush();
 	TLB_Entry& tlb_entry = UTLB[entry];

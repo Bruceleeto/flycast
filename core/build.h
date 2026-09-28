@@ -1,8 +1,12 @@
 #pragma once
-//#define STRICT_MODE
+#define STRICT_MODE
 #ifndef STRICT_MODE
 #define FAST_MMU
 #define USE_WINCE_HACK
+#endif
+#ifdef STRICT_MODE
+// ARM7 JIT never invalidates on sound-RAM writes; the interpreter fetches live (self-modifying ARM code)
+#define FEAT_AREC DYNAREC_NONE
 #endif
 
 #define DC_PLATFORM_DREAMCAST   0

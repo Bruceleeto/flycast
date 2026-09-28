@@ -17,6 +17,7 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
 #pragma once
+#include "sh4_trace.h"
 #include <array>
 #include "types.h"
 #include "sh4_mem.h"
@@ -82,6 +83,9 @@ public:
 			// miss
 			line.valid = true;
 			line.address = tag;
+#if SH4_TRACE
+			sh4trace::icacheFill(index, address, physAddr);
+#endif
 			const u32 line_addr = physAddr & ~0x1f;
 			u8* const memPtr = GetMemPtr(line_addr, sizeof(line.data));
 			if (memPtr != nullptr)
@@ -94,6 +98,10 @@ public:
 			}
 			sh4cycles.addReadAccessCycles(physAddr, 32);
 		}
+#if SH4_TRACE
+		else if (u16 *ram = (u16 *)GetMemPtr(physAddr, 2))
+			sh4trace::icacheHit(address, physAddr, *(u16*)&line.data[physAddr & 0x1f], *ram);
+#endif
 
 		return *(u16*)&line.data[physAddr & 0x1f];
 	}
@@ -122,6 +130,9 @@ public:
 		u32 index = (addr >> 5) & 0xFF;
 		return (u32)lines[index].valid | (lines[index].address << 10);
 	}
+#if SH4_TRACE
+	const u8 *lineData(u32 index) const { return lines[index & 0xff].data; }
+#endif
 
 	void WriteAddressArray(u32 addr, u32 data)
 	{
@@ -254,8 +265,16 @@ public:
 			mmu_raise_exception(err, address, MMU_TT_DREAD);
 
 		if (!cacheOn) {
+			waitWriteBuffers();
 			sh4cycles.addReadAccessCycles(physAddr, sizeof(T));
+#if SH4_TRACE
+			T v = addrspace::readt<T>(physAddr);
+			sh4trace::io(false, physAddr, (u32)v, sizeof(T));
+			sh4trace::data(false, physAddr, (u32)v, sizeof(T), false);
+			return v;
+#else
 			return addrspace::readt<T>(physAddr);
+#endif
 		}
 
 		const u32 index = lineIndex(address);
@@ -270,6 +289,9 @@ public:
 			line.address = tag;
 			readCacheLine(physAddr, line);
 		}
+#if SH4_TRACE
+		sh4trace::data(false, physAddr, (u32)*(T*)&line.data[physAddr & 0x1f], sizeof(T), true);
+#endif
 
 		return *(T*)&line.data[physAddr & 0x1f];
 	}
@@ -287,10 +309,17 @@ public:
 		if (!cacheOn)
 		{
 			addWriteThroughCycles(physAddr, sizeof(T));
+#if SH4_TRACE
+			sh4trace::io(true, physAddr, (u32)data, sizeof(T));
+			sh4trace::data(true, physAddr, (u32)data, sizeof(T), false);
+#endif
 			addrspace::writet<T>(physAddr, data);
 			return;
 		}
 
+#if SH4_TRACE
+		sh4trace::data(true, physAddr, (u32)data, sizeof(T), true);
+#endif
 		const u32 index = lineIndex(address);
 		cache_line& line = lines[index];
 		const u32 tag = (physAddr >> 10) & 0x7ffff;
@@ -405,6 +434,9 @@ public:
 		u32 index = (addr >> 5) & 0x1FF;
 		return (u32)lines[index].valid | ((u32)lines[index].dirty << 1) | (lines[index].address << 10);
 	}
+#if SH4_TRACE
+	const u8 *lineData(u32 index) const { return lines[index & 0x1ff].data; }
+#endif
 
 	void WriteAddressArray(u32 addr, u32 data)
 	{
@@ -498,6 +530,7 @@ private:
 			for (int i = 0; i < 32; i += 4)
 				*p++ = addrspace::read32(line_addr + i);
 		}
+		waitWriteBuffers();
 		sh4cycles.addReadAccessCycles(address, 32);
 	}
 
@@ -506,6 +539,12 @@ private:
 		if (CCN_CCR.ORA && (index & 0x80))
 			return;
 		u32 line_addr = (line.address << 10) | ((index & 0x1F) << 5);
+#if SH4_TRACE
+		sh4trace::targetBlock("OCACHE writeback", line_addr, line.data, sizeof(line.data));
+		if ((line_addr & 0x1fffffe0) == 0x0c400000)
+			WARN_LOG(SH4, "WORD0 OCACHE writeback %08x value %08x index %x pc %08x instr %llu", line_addr, *(u32 *)line.data, index,
+					Sh4cntx.pc - 2, (unsigned long long)sh4trace::instrCount);
+#endif
 		u8* memPtr = GetMemPtr(line_addr, sizeof(line.data));
 		if (memPtr != nullptr)
 			memcpy(memPtr, line.data, sizeof(line.data));
@@ -590,19 +629,35 @@ private:
 	{
 		u64 now = sh4cycles.now();
 		if (writeBackBufferCycles > now)
+		{
 			sh4cycles.addCycles(writeBackBufferCycles - now);
+			now = writeBackBufferCycles;
+		}
 		writeBackBufferCycles = now + sh4cycles.writeAccessCycles(addr, 32);
 	}
 
+	// Uncached and write-through stores are posted into a one-entry buffer; the next one waits until it is free
 	void addWriteThroughCycles(u32 addr, int size)
 	{
 		u64 now = sh4cycles.now();
 		if (writeThroughBufferCycles > now)
+		{
 			sh4cycles.addCycles(writeThroughBufferCycles - now);
+			now = writeThroughBufferCycles;
+		}
 		int cycles = sh4cycles.writeAccessCycles(addr, std::min(size, 8));
 		if (size == 32)
 			sh4cycles.addCycles(cycles * 3);
 		writeThroughBufferCycles = now + cycles;
+	}
+
+	// A read, of any area, starts only once the posted uncached / write-through store has finished (measured,
+	// bsc-memmap.md 4.7). A dirty line's write-back does not delay the fill (read miss, dirty victim: 24 Icyc).
+	void waitWriteBuffers()
+	{
+		const u64 now = sh4cycles.now();
+		if (writeThroughBufferCycles > now)
+			sh4cycles.addCycles(writeThroughBufferCycles - now);
 	}
 
 	std::array<cache_line, 512> lines;

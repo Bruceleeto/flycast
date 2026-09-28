@@ -10,6 +10,7 @@
 #include "hw/sh4/modules/dmac.h"
 #include "hw/sh4/sh4_mem.h"
 #include "hw/sh4/sh4_mmr.h"
+#include "hw/sh4/sh4_trace.h"
 
 static void RegWrite_SB_C2DST(u32 addr, u32 data)
 {
@@ -33,6 +34,12 @@ static void do_pvr_dma()
 		return;
 	}
 	DEBUG_LOG(PVR, "PVR-DMA %x %s %x len %x", src, SB_PDDIR ? "<-" : "->", dst, len);
+#if SH4_TRACE
+	if (!SB_PDDIR)
+		sh4trace::vramXfer(2, "pvr-dma", src, dst, len, SB_LMMODE0, SB_LMMODE1);
+	else if (sh4trace::limit(0xd0010, 50))
+		WARN_LOG(SH4, "VRAMXFER pvr-dma READ %08x -> RAM %08x len %x", dst, src, len);
+#endif
 
 	if (SB_PDDIR)
 		//PVR -> System

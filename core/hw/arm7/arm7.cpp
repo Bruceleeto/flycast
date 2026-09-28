@@ -6,14 +6,14 @@ namespace aica::arm
 {
 
 #define CPUReadMemoryQuick(addr) (*(u32*)&aica_ram[(addr) & ARAM_MASK])
-#define CPUReadByte readMem<u8>
-#define CPUReadMemory readMem<u32>
-#define CPUReadHalfWord readMem<u16>
-#define CPUReadHalfWordSigned(addr) ((s16)readMem<u16>(addr))
+#define CPUReadByte timedRead<u8>
+#define CPUReadMemory timedRead<u32>
+#define CPUReadHalfWord timedRead<u16>
+#define CPUReadHalfWordSigned(addr) ((s16)timedRead<u16>(addr))
 
-#define CPUWriteMemory writeMem<u32>
-#define CPUWriteHalfWord writeMem<u16>
-#define CPUWriteByte writeMem<u8>
+#define CPUWriteMemory timedWrite<u32>
+#define CPUWriteHalfWord timedWrite<u16>
+#define CPUWriteByte timedWrite<u8>
 
 #define reg arm_Reg
 #define armNextPC reg[R15_ARM_NEXT].I
@@ -23,6 +23,48 @@ namespace aica::arm
 #define CPUUpdateTicksAccess16(a) 1
 
 alignas(8) reg_pair arm_Reg[RN_ARM_REG_COUNT];
+
+//
+// AICA ARM7DI bus timing, measured on a retail console (wren7-rtl model/TIMING.md sections 2-4, the "fixed
+// costs with the 4-MCLK grid, no slots" approximation, within 1% with the DSP idle).
+// Time is in MCLK (22.5792 MHz, 512 per sample). Every memory cycle, N or S, fetch or data, wave RAM or AICA
+// register, starts on a 4-MCLK DSP step boundary and lasts 8 MCLK. Internal cycles last 1 MCLK. The ARM
+// interrupt controller's L and M registers take 1 MCLK off the grid, and SWP's locked write takes 4.
+// Not modelled yet: wave RAM slots taken by DSP MRD/MWT, playing channels, the fixed pair at steps 109/111,
+// SH4 wave RAM traffic, and TEMP/EFREG port stalls.
+//
+static u64 armMclk;
+static int swpPhase;	// 1: SWP read pending, 2: its locked write next
+
+static inline void memCycle(u32 addr)
+{
+	addr &= 0x00FFFFFC;
+	if (addr == 0x802D00 || addr == 0x802D04)
+	{
+		armMclk += 1;
+		return;
+	}
+	u32 len = 8;
+	if (swpPhase == 2)
+		len = 4;
+	else if (swpPhase == 1)
+		swpPhase = 2;
+	armMclk = ((armMclk + 3) & ~(u64)3) + len;
+}
+
+template<typename T>
+static inline T timedRead(u32 addr)
+{
+	memCycle(addr);
+	return readMem<T>(addr);
+}
+
+template<typename T>
+static inline void timedWrite(u32 addr, T data)
+{
+	memCycle(addr);
+	writeMem<T>(addr, data);
+}
 
 static void CPUSwap(u32 *a, u32 *b)
 {
@@ -56,6 +98,58 @@ int arm7ClockTicks;
 
 #if FEAT_AREC == DYNAREC_NONE
 
+static bool condPassed(u32 cond)
+{
+	switch (cond)
+	{
+	case 0x0: return Z_FLAG;
+	case 0x1: return !Z_FLAG;
+	case 0x2: return C_FLAG;
+	case 0x3: return !C_FLAG;
+	case 0x4: return N_FLAG;
+	case 0x5: return !N_FLAG;
+	case 0x6: return V_FLAG;
+	case 0x7: return !V_FLAG;
+	case 0x8: return C_FLAG && !Z_FLAG;
+	case 0x9: return !C_FLAG || Z_FLAG;
+	case 0xA: return N_FLAG == V_FLAG;
+	case 0xB: return N_FLAG != V_FLAG;
+	case 0xC: return !Z_FLAG && N_FLAG == V_FLAG;
+	case 0xD: return Z_FLAG || N_FLAG != V_FLAG;
+	case 0xE: return true;
+	default: return false;
+	}
+}
+
+// Internal (I) cycles of an executed instruction (data sheet DDI0027D chapter 9). Sets swpPhase for SWP.
+static u32 internalCycles(u32 op)
+{
+	if ((op & 0x0FC000F0) == 0x00000090)	// MUL, MLA: m cycles of the 2-bit Booth multiplier, unsigned early termination
+	{
+		u32 rs = reg[(op >> 8) & 15].I;
+		u32 m = 1;
+		while (m < 16 && (rs >> (2 * m - 1)) != 0)
+			m++;
+		return m;
+	}
+	if ((op & 0x0FB00FF0) == 0x01000090)	// SWP, SWPB
+	{
+		swpPhase = 1;
+		return 1;
+	}
+	if ((op & 0x0E000090) == 0x00000010)	// data processing, shift amount in Rs
+		return 1;
+	if ((op & 0x0E000010) == 0x06000010)	// undefined
+		return 1;
+	if ((op & 0x0C100000) == 0x04100000)	// LDR, LDRB
+		return 1;
+	if ((op & 0x0E100000) == 0x08100000)	// LDM
+		return 1;
+	if ((op & 0x0C000000) == 0x0C000000 && (op & 0x0F000000) != 0x0F000000)	// coprocessor: undefined, no coprocessor
+		return 1;
+	return 0;
+}
+
 static void runInterpreter(u32 CycleCount)
 {
 	if (!Arm7Enabled)
@@ -64,13 +158,36 @@ static void runInterpreter(u32 CycleCount)
 	arm7ClockTicks -= CycleCount;
 	while (arm7ClockTicks < 0)
 	{
+		const int ticks = arm7ClockTicks;
+		const u64 t0 = armMclk;
 		if (reg[INTR_PEND].I)
+		{
 			CPUFiq();
+			// exception entry: S, N, S
+			memCycle(armNextPC);
+			memCycle(armNextPC);
+			memCycle(armNextPC);
+		}
 
+		const u32 pc = armNextPC;
 		reg[15].I = armNextPC + 8;
+		memCycle(pc);		// this instruction's S cycle
+		const u32 op = CPUReadMemoryQuick(pc);
+		const u32 icycles = condPassed(op >> 28) ? internalCycles(op) : 0;
 
-		int& clockTicks = arm7ClockTicks;
-		#include "arm-new.h"
+		{
+			int& clockTicks = arm7ClockTicks;
+			#include "arm-new.h"
+		}
+		swpPhase = 0;
+		armMclk += icycles;
+		if (armNextPC != pc + 4)
+		{
+			// pipeline refill: N, S
+			memCycle(armNextPC);
+			memCycle(armNextPC + 4);
+		}
+		arm7ClockTicks = ticks + (int)(armMclk - t0);
 	}
 }
 

@@ -3,6 +3,11 @@
 
 #define SH4_TIMESLICE 448	// at 112 Bangai-O doesn't start. 224 is ok
 
+// Length in cycles of the current interpreter slice. The interpreter ends a slice when the next
+// scheduled event is due so that events (and the interrupts they raise) happen at the right
+// instruction, like on hardware. Always SH4_TIMESLICE with the dynarecs.
+extern int sh4SliceLength;
+
 /*
 	tag, as passed on sh4_sched_register
 	sch_cycles, the cycle duration that the callback requested (sh4_sched_request)

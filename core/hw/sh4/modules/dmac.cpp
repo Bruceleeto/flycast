@@ -10,6 +10,7 @@
 #include "hw/sh4/sh4_mem.h"
 #include "hw/pvr/pvr_mem.h"
 #include "dmac.h"
+#include "hw/sh4/sh4_trace.h"
 #include "hw/sh4/sh4_interrupts.h"
 #include "hw/holly/holly_intc.h"
 
@@ -64,6 +65,9 @@ void DMAC_Ch2St()
 	else
 	{
 		bool path64b = SB_C2DSTAT & 0x02000000 ? SB_LMMODE1 == 0 : SB_LMMODE0 == 0;
+#if SH4_TRACE
+		sh4trace::vramXfer(1, "ch2", src, ((dst & 0x00ffffff) | (path64b ? 0x04000000 : 0x05000000)), len, SB_LMMODE0, SB_LMMODE1);
+#endif
 
 		if (path64b)
 		{

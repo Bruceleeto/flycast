@@ -11,6 +11,7 @@ void map_p4();
 
 void sh4_mmr_init();
 void sh4_mmr_reset(bool hard);
+void sh4_mmr_manual_reset();
 void sh4_mmr_term();
 
 namespace sh4
@@ -65,6 +66,10 @@ void deserialize2(Deserializer& deser);
 
 //CCN INTEVT 0xFF000028 0x1F000028 32 Undefined Undefined Held Held Iclk
 #define CCN_INTEVT_addr 0x1F000028
+
+// Undocumented. Read/write mask 0x00010007, 0 at boot (measured on a VA1 Dreamcast:
+// writing 0x92b reads back 3, not a CCR alias)
+#define CCN_UNK2C_addr 0x1F00002C
 
 // Undocumented. Returns 0x040205c1
 #define CPU_VERSION_addr 0x1F000030

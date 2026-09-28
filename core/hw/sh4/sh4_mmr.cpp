@@ -617,6 +617,33 @@ void sh4_mmr_reset(bool hard)
 	memset(p_sh4rcb->cntx.sq_buffer, 0, sizeof(p_sh4rcb->cntx.sq_buffer));
 }
 
+// Manual reset (SH7750 HW manual 5.6.1 and appendix A): only the registers whose manual reset
+// value is defined are initialized. BSC, CPG, UBC and the cache/TLB contents are held.
+void sh4_mmr_manual_reset()
+{
+	// CCN
+	WriteMem_p4mmr<u32>(0xFF000010, 0);	// MMUCR
+	WriteMem_p4mmr<u32>(0xFF00001C, 0);	// CCR
+	CCN_EXPEVT = 0x020;
+	// DMAC
+	for (u32 ch = 0; ch < 4; ch++)
+		WriteMem_p4mmr<u32>(0xFFA0000C + ch * 0x10, 0);	// CHCRn
+	WriteMem_p4mmr<u32>(0xFFA00040, 0);	// DMAOR
+	// INTC
+	WriteMem_p4mmr<u16>(0xFFD00000, 0);	// ICR
+	WriteMem_p4mmr<u16>(0xFFD00004, 0);	// IPRA
+	WriteMem_p4mmr<u16>(0xFFD00008, 0);	// IPRB
+	WriteMem_p4mmr<u16>(0xFFD0000C, 0);	// IPRC
+	// RTC
+	WriteMem_p4mmr<u8>(0xFFC80038, 0);	// RCR1
+	WriteMem_p4mmr<u8>(0xFFC8003C, 0);	// RCR2
+	// TMU (TCPR2 is held, and is not touched by reset())
+	tmu.reset();
+	// SCI, SCIF
+	sci.reset();
+	scif.reset(false);
+}
+
 void sh4_mmr_term()
 {
 	MMU_term();
@@ -723,6 +750,7 @@ void deserialize(Deserializer& deser)
 		deser.skip<u32>(); // sh4InterpCycles
 	if (deser.version() < Deserializer::V21)
 		p_sh4rcb->cntx.cycle_counter = SH4_TIMESLICE;
+		sh4SliceLength = SH4_TIMESLICE;
 
 	sh4_sched_deserialize(deser);
 }

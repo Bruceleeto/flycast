@@ -131,6 +131,8 @@ static void setHostRoundingMode(u32 roundingMode, u32 denorm2zero)
 //called when fpscr is changed and we must check for reg banks etc..
 void DYNACALL Sh4Context::UpdateFPSCR(Sh4Context *ctx)
 {
+	// FPSCR is 22 bits wide, bits 22-31 are reserved and read as 0
+	ctx->fpscr.full &= 0x003fffff;
 	if (ctx->fpscr.FR != ctx->old_fpscr.FR)
 		// FPU bank change
 		std::swap(ctx->xf, ctx->fr);

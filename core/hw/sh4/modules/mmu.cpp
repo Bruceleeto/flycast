@@ -156,6 +156,26 @@ static void mmuException(MmuError mmu_error, u32 address, u32 am, F raise)
 
 [[noreturn]] void mmu_raise_exception(MmuError mmu_error, u32 address, u32 am)
 {
+	WARN_LOG(SH4, "mmu_raise_exception: error %d addr %08x access %d pc %08x sr %08x ccr %08x",
+			(int)mmu_error, address, am, Sh4cntx.pc, Sh4cntx.sr.getFull(), CCN_CCR.reg_data);
+	static int dumps;
+	if (++dumps <= 4)
+	{
+		WARN_LOG(SH4, "  MMUCR %08x PTEH %08x PTEL %08x PTEA %08x TTB %08x mmuOn %d",
+				CCN_MMUCR.reg_data, CCN_PTEH.reg_data, CCN_PTEL.reg_data, CCN_PTEA.reg_data, CCN_TTB, mmuOn);
+		int valid = 0;
+		for (int i = 0; i < 64; i++)
+			if (UTLB[i].Data.V)
+			{
+				valid++;
+				WARN_LOG(SH4, "  UTLB[%2d] addr %08x data %08x assist %08x", i, UTLB[i].Address.reg_data,
+						UTLB[i].Data.reg_data, UTLB[i].Assistance.reg_data);
+			}
+		for (int i = 0; i < 4; i++)
+			if (ITLB[i].Data.V)
+				WARN_LOG(SH4, "  ITLB[%d] addr %08x data %08x", i, ITLB[i].Address.reg_data, ITLB[i].Data.reg_data);
+		WARN_LOG(SH4, "  %d valid UTLB entries", valid);
+	}
 	mmuException(mmu_error, address, am, [](Sh4ExceptionCode event) {
 		debugger::debugTrap(event);	// FIXME CCN_TEA and CCN_PTEH have been updated already
 
@@ -463,7 +483,13 @@ void mmu_set_state()
 {
 	if (CCN_MMUCR.AT == 1)
 	{
+#ifdef STRICT_MODE
+		// Real hardware translates every P0/U0/P3 access as soon as AT is set, even with an empty
+		// UTLB: misses raise TLB exceptions that the guest handler fills (bleem relies on this).
+		if (!mmuOn)
+#else
 		if (!mmuOn && utlbHasRealMapping())
+#endif
 		{
 			mmuOn = true;
 #ifdef FAST_MMU

@@ -89,13 +89,15 @@ struct Track
 	TrackFile* file = nullptr;	// handler for actual IO
 	u32 StartFAD = 0;			// Start FAD
 	u32 EndFAD = 0;				// End FAD
+	u32 PregapFAD = 0;			// First readable FAD when the image holds the pregap sectors (0: StartFAD)
 	u8 CTRL = 0;
 	u8 ADR = 0;
 	std::string isrc;
 
 	bool Read(u32 FAD, u8 *dst, SectorFormat *sector_type, u8 *subcode, SubcodeFormat *subcode_type)
 	{
-		if (FAD >= StartFAD && (FAD <= EndFAD || EndFAD == 0) && file != nullptr)
+		u32 firstFAD = PregapFAD != 0 ? PregapFAD : StartFAD;
+		if (FAD >= firstFAD && (FAD <= EndFAD || EndFAD == 0) && file != nullptr)
 			return file->Read(FAD, dst, sector_type, subcode, subcode_type);
 		else
 			return false;

@@ -36,6 +36,7 @@ target_sources(${PROJECT_NAME} PRIVATE
         sh4_cache.h
         sh4_cycles.cpp
         sh4_cycles.h
+        sh4_timing_data.h
         sh4_core.h
         sh4_core_regs.cpp
         sh4_if.h

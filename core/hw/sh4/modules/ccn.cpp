@@ -2,6 +2,9 @@
 //CCN: Cache and TLB controller
 
 #include "ccn.h"
+#include "hw/sh4/sh4_trace.h"
+#include <cstdio>
+#include <unistd.h>
 #include "mmu.h"
 #include "hw/sh4/sh4_if.h"
 #include "hw/sh4/sh4_mmr.h"
@@ -46,6 +49,16 @@ static void CCN_MMUCR_write(u32 addr, u32 value)
 	temp.reg_data = value & 0xfcfcff05;
 
 	bool mmu_changed_state = temp.AT != CCN_MMUCR.AT;
+#if SH4_TRACE
+	if (sh4trace::limit(0x20000 | (value & 0xff), 16))
+		WARN_LOG(SH4, "MMUCR <- %08x (was %08x) pc %08x mmuOn %d", value, CCN_MMUCR.reg_data, Sh4cntx.pc - 2, mmuOn);
+	if (CCN_MMUCR.AT == 1 && temp.AT == 0 && sh4trace::limit(0x30000, 3))
+	{
+		sh4trace::dumpRing("MMU turned off");
+		// follow where the next stage goes (runs now exit on a jump to the reset vector instead)
+		sh4trace::followJumps = 400;
+	}
+#endif
 
 	if (temp.TI != 0)
 	{
@@ -85,6 +98,11 @@ static void CCN_CCR_write(u32 addr, u32 value)
 {
 	CCN_CCR_type temp;
 	temp.reg_data = value & 0x89AF;
+#if SH4_TRACE
+	if (sh4trace::limit(0x60000 | (value & 0xffff), 8))
+		WARN_LOG(SH4, "CCR <- %08x pc %08x ICI %d OCI %d dynarec %d", value, Sh4cntx.pc - 2, temp.ICI, temp.OCI,
+				(int)config::DynarecEnabled);
+#endif
 
 	if (temp.ICI) {
 		DEBUG_LOG(SH4, "Sh4: i-cache invalidation %08X", Sh4cntx.pc);
@@ -151,6 +169,9 @@ void CCNRegisters::init()
 
 	//CCN INTEVT 0xFF000028 0x1F000028 32 Undefined Undefined Held Held Iclk
 	setRW<CCN_INTEVT_addr, u32, 0x00000fff>();
+
+	// 0xFF00002C (undocumented; bits 0-2 and 16 are kept on real hardware, 32-bit access only)
+	setRW<CCN_UNK2C_addr, u32, 0x00010007>();
 
 	// CPU VERSION 0xFF000030 0x1F000030 (undocumented)
 	setReadOnly<CPU_VERSION_addr>(CPU_VERSION_read);

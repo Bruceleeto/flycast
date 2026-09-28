@@ -5,6 +5,7 @@
 	Most of this was hacked together when i needed support for YUV-dma for thps2 ;)
 */
 #include "pvr_mem.h"
+#include "hw/sh4/sh4_trace.h"
 #include "Renderer_if.h"
 #include "ta.h"
 #include "hw/holly/sb.h"
@@ -205,10 +206,20 @@ void YUV_reset()
 
 //vram 32-64b
 
+// With 8 MB of texture memory (Dreamcast) only the lower half of each 16 MB area 1 window is decoded:
+// writes to the upper half (0x04800000-0x04ffffff, 0x05800000-0x05ffffff and the 0x06/0x07 mirrors) are dropped and
+// reads return open bus, normally all ones. Checked on a retail console (build/hwtest/vrammirror.c).
+static inline bool vramUnmapped(u32 addr)
+{
+	return VRAM_SIZE == 0x800000 && (addr & 0x00800000) != 0;
+}
+
 //read
 template<typename T>
 T DYNACALL pvr_read32p(u32 addr)
 {
+	if (vramUnmapped(addr))
+		return (T)~0u;
 	return *(T *)&vram[pvr_map32(addr) & ~(sizeof(T) - 1)];
 }
 template u8 pvr_read32p<u8>(u32 addr);
@@ -225,6 +236,8 @@ void DYNACALL pvr_write32p(u32 addr, T data)
 		INFO_LOG(MEMORY, "%08x: 8-bit VRAM writes are not possible", addr);
 		return;
 	}
+	if (vramUnmapped(addr))
+		return;
 	addr &= ~(sizeof(T) - 1);
 	u32 vaddr = addr & VRAM_MASK;
 	if (vaddr >= fb_watch_addr_start && vaddr < fb_watch_addr_end)
@@ -238,6 +251,29 @@ template void pvr_write32p<u16, false>(u32 addr, u16 data);
 template void pvr_write32p<u16, true>(u32 addr, u16 data);
 template void pvr_write32p<u32, false>(u32 addr, u32 data);
 template void pvr_write32p<u32, true>(u32 addr, u32 data);
+
+// 64-bit path, used instead of a direct memory block when the upper half of the window is not decoded
+template<typename T>
+T DYNACALL pvr_read64p(u32 addr)
+{
+	if (vramUnmapped(addr))
+		return (T)~0u;
+	return *(T *)&vram[addr & VRAM_MASK];
+}
+template u8 pvr_read64p<u8>(u32 addr);
+template u16 pvr_read64p<u16>(u32 addr);
+template u32 pvr_read64p<u32>(u32 addr);
+
+template<typename T>
+void DYNACALL pvr_write64p(u32 addr, T data)
+{
+	if (vramUnmapped(addr))
+		return;
+	*(T *)&vram[addr & VRAM_MASK] = data;
+}
+template void pvr_write64p<u8>(u32 addr, u8 data);
+template void pvr_write64p<u16>(u32 addr, u16 data);
+template void pvr_write64p<u32>(u32 addr, u32 data);
 
 void DYNACALL TAWrite(u32 address, const SQBuffer *data, u32 count)
 {
@@ -267,6 +303,9 @@ void DYNACALL TAWriteSQ(u32 address, const SQBuffer *sqb)
 		// Used by WinCE
 		DEBUG_LOG(MEMORY, "Vram TAWriteSQ 0x%X SB_LMMODE0 %d", address, SB_LMMODE0);
 		bool path64b = (unlikely(address & 0x02000000) ? SB_LMMODE1 : SB_LMMODE0) == 0;
+#if SH4_TRACE
+		sh4trace::vramXfer(3, "sq", 0, (address_w & 0x00ffffff) | (path64b ? 0x04000000 : 0x05000000), 32, SB_LMMODE0, SB_LMMODE1);
+#endif
 		if (path64b)
 		{
 			// 64b path
@@ -323,6 +362,9 @@ template<typename T, bool upper>
 void DYNACALL pvr_write_area4(u32 addr, T data)
 {
 	bool access32 = (upper ? SB_LMMODE1 : SB_LMMODE0) == 1;
+#if SH4_TRACE
+	sh4trace::vramXfer(4, "area4", 0, (addr & 0x00ffffff) | (access32 ? 0x05000000 : 0x04000000), sizeof(T), SB_LMMODE0, SB_LMMODE1);
+#endif
 	if (access32)
 		pvr_write32p(addr, data);
 	else

@@ -14,6 +14,11 @@
 #include "hw/sh4/sh4_sched.h"
 #include "imgread/common.h"
 #include "serialize.h"
+#include "hw/sh4/sh4_trace.h"
+#if SH4_TRACE
+#undef DEBUG_LOG
+#define DEBUG_LOG(t, ...) WARN_LOG(t, __VA_ARGS__)
+#endif
 
 int gdrom_schid;
 
@@ -106,6 +111,7 @@ void libCore_CDDA_Sector(s16* sector)
 
 static void gd_spi_pio_end(const u8* buffer, u32 len, gd_states next_state = gds_pio_end);
 static void gd_process_spi_cmd();
+static bool unitAttentionReported;	// the last packet command ended with CHECK for a unit attention
 static void gd_process_ata_cmd();
 
 void DmaBuffer::fill(read_params_t& params)
@@ -435,8 +441,22 @@ static void gd_process_ata_cmd()
 	case ATA_SOFT_RESET:
 		{
 			printf_ata("ATA_SOFT_RESET");
+#if SH4_TRACE
+			if (sh4trace::cdOpenAt != 0)
+			{
+				WARN_LOG(GDROM, "SWAP: soft reset at instr %llu, job [8c031c8c..9f] %08x %08x %08x %08x %08x flags %08x",
+						(unsigned long long)sh4trace::instrCount, ReadMem32_nommu(0x8c031c8c), ReadMem32_nommu(0x8c031c90),
+						ReadMem32_nommu(0x8c031c94), ReadMem32_nommu(0x8c031c98), ReadMem32_nommu(0x8c031c9c), ReadMem32_nommu(Sh4cntx.gbr + 0x2fc));
+				sh4trace::dumpRing("soft reset after swap");
+				sh4trace::snapshot("swap_soft_reset", Sh4cntx.pc, 0);
+			}
+#endif
 			gd_reset();
+			// SPI spec 3.3.1: the task file is initialised as after power-on (Status 00h) and the drive is then
+			// "set to the ready state". DRDY: "set to 1 when the drive is able to respond to an ATA command".
+			// bleemcast polls the alternate status long after a soft reset and re-initialises the drive if it reads 0.
 			GDStatus.full = 0;
+			GDStatus.DRDY = 1;
 			Error.full = 1;
 			sns_key = 0;
 			SecNumber.Status = GD_PAUSE;
@@ -715,7 +735,20 @@ static void gd_process_spi_cmd()
 		packet_cmd.data_8[0], packet_cmd.data_8[1], packet_cmd.data_8[2], packet_cmd.data_8[3], packet_cmd.data_8[4], packet_cmd.data_8[5],
 		packet_cmd.data_8[6], packet_cmd.data_8[7], packet_cmd.data_8[8], packet_cmd.data_8[9], packet_cmd.data_8[10], packet_cmd.data_8[11] );
 
-	if (sns_key == 0x0 			// No sense
+	// SPI spec 1.30, REQ_ERROR: "When another command is issued, error information is cleared."
+	// An illegal request only describes the command that caused it. Drive conditions (not ready, unit attention)
+	// stay pending until reported.
+	// A unit attention (disc changed, reset) is a one-shot report: once a command has ended with CHECK for it, the
+	// following command runs normally. bleemcast re-issues REQ_MODE after a disc swap and never sends REQ_ERROR.
+	// (The ATA packet command clears CHECK before this runs, hence the separate flag.)
+	if (packet_cmd.data_8[0] != SPI_REQ_ERROR && (sns_key == 5 || (sns_key == 6 && unitAttentionReported)))
+	{
+		sns_key = 0;
+		sns_asc = 0;
+		sns_ascq = 0;
+	}
+
+	if (sns_key == 0x0			// No sense
 			|| sns_key == 0xB)	// Aborted
 		GDStatus.CHECK=0;
 	else
@@ -747,6 +780,16 @@ static void gd_process_spi_cmd()
 	case SPI_CD_READ:
 	case SPI_CD_READ2:
 		{
+#if SH4_TRACE
+			// first disc read after bleem's drive check (70/71/72/73) went through
+			if (sh4trace::drive73Done)
+			{
+				sh4trace::drive73Done = false;
+				static int snaps;
+				if (++snaps <= 1)
+					sh4trace::snapshot("after_drive_check", Sh4cntx.pc, 0);
+			}
+#endif
 #define readcmd packet_cmd.GDReadBlock
 
 			cdda.status = cdda_t::NoInfo;
@@ -767,6 +810,14 @@ static void gd_process_spi_cmd()
 			read_params.sector_type = sector_type;//yeah i know , not really many types supported...
 
 			printf_spicmd("SPI_CD_READ - Sector=%d Size=%d/%d DMA=%d",read_params.start_sector,read_params.remaining_sectors,read_params.sector_type,Features.CDRead.DMA);
+#if SH4_TRACE
+			WARN_LOG(GDROM, "CDREAD cmd %02x fad %06x (%d) count %d type %d dma %d prmtype %d  bytes %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x  instr %llu",
+					packet_cmd.data_8[0], read_params.start_sector, read_params.start_sector, read_params.remaining_sectors, sector_type,
+					Features.CDRead.DMA, readcmd.prmtype, packet_cmd.data_8[0], packet_cmd.data_8[1], packet_cmd.data_8[2],
+					packet_cmd.data_8[3], packet_cmd.data_8[4], packet_cmd.data_8[5], packet_cmd.data_8[6], packet_cmd.data_8[7],
+					packet_cmd.data_8[8], packet_cmd.data_8[9], packet_cmd.data_8[10], packet_cmd.data_8[11],
+					(unsigned long long)sh4trace::instrCount);
+#endif
 			if (Features.CDRead.DMA == 1) {
 				pio_buff.clear();
 				gd_set_state(gds_readsector_dma);
@@ -795,11 +846,51 @@ static void gd_process_spi_cmd()
 		//seems like a non data command :)
 	case 0x70:
 		printf_spicmd("SPI : unknown ? [0x70]");
+#if SH4_TRACE
+		{
+			static int dumps;
+			if (++dumps <= 4)
+				sh4trace::dumpRing("GD-ROM security command 0x70 (drive re-init)");
+		}
+#endif
 		//printf("SPI : unknown ? [0x70]\n");
 		/*GDStatus.full=0x50; //FIXME
 		RaiseInterrupt(holly_GDROM_CMD);*/
 
 		gd_set_state(gds_procpacketdone);
+		break;
+
+	// SYS_CHG_COMD: 1 parameter byte (a key; the retail BIOS passes a byte of the unit serial number), no data.
+	// Undocumented; see the notes in MAME's gdrom.cpp. No known drive behaviour depends on the key value.
+	case 0x72:
+		printf_spicmd("SPI : SYS_CHG_COMD [0x72] key %02x", packet_cmd.data_8[1]);
+		gd_set_state(gds_procpacketdone);
+		break;
+
+	// SYS_REQ_COMD: returns the list of regular packet commands the drive supports, obfuscated the same way as the
+	// 0x71 reply: each real byte is sent as a record [any][n][n-3 filler bytes][byte], and filler follows the last record.
+	case 0x73:
+		{
+			printf_spicmd("SPI : SYS_REQ_COMD [0x73]");
+			static const u8 commands[] { 0x00, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x20, 0x21, 0x22, 0x30, 0x31, 0x40 };
+			u8 reply[1012];	// the real drive sends a bit less than 1 KB, the length varying between replies
+			u32 seed = 0x73;
+			auto next = [&seed]() { seed = seed * 1103515245 + 12345; return (u8)(seed >> 16); };
+			for (u8& b : reply)
+				b = next();
+			u32 offset = 0;
+			for (u8 c : commands)
+			{
+				const u32 n = 3 + next() % 13;
+				reply[offset + 1] = n;
+				reply[offset + n - 1] = c;
+				offset += n;
+			}
+			gd_spi_pio_end(reply, sizeof(reply));
+#if SH4_TRACE
+			sh4trace::drive73Done = true;
+#endif
+		}
 		break;
 
 
@@ -904,6 +995,10 @@ static void gd_process_spi_cmd()
 
 	case SPI_CD_OPEN:
 		printf_spicmd("SPI_CD_OPEN Unhandled");
+#if SH4_TRACE
+		if (sh4trace::cdOpenAt == 0)
+			sh4trace::cdOpenAt = sh4trace::instrCount;
+#endif
 		
 		gd_set_state(gds_procpacketdone);
 		break;
@@ -1036,10 +1131,20 @@ static void gd_process_spi_cmd()
 		gd_set_state(gds_procpacketdone);
 		break;
 	}
+	unitAttentionReported = sns_key == 6 && GDStatus.CHECK;
 }
 //Read handler
 u32 ReadMem_gdrom(u32 Addr, u32 sz)
-{	
+{
+	// The CPU can only access the GD-ROM registers as bytes or words (Dev.Box System Architecture 4.1.1.2).
+	// EXPERIMENT: assume an unsupported longword read returns all ones (bleem! derives interrupt masks from one)
+	if (sz == 4)
+	{
+		static int logged;
+		if (logged++ < 32)
+			WARN_LOG(GDROM, "GDROM: 32-bit read from %08x (status %02x) pc %08x", Addr, GDStatus.full, Sh4cntx.pc - 2);
+		return 0xffffffff;
+	}
 	switch (Addr)
 	{
 		//cancel interrupt
@@ -1049,6 +1154,20 @@ u32 ReadMem_gdrom(u32 Addr, u32 sz)
 			// slave drive doesn't exist
 			return 0;
 		printf_rm("GDROM: STATUS [cancel int](v=%X)",GDStatus.full);
+		if (GDStatus.CHECK && GDStatus.DRQ && gd_state == gds_pio_send_data)
+		{
+			// SPI spec 1.30 4.1 h): "If an error status was reported during read-out of the status [...], the device
+			// clears the DRQ bit and completes the execution of the command."
+			// bleemcast reads CHECK after a command issued with a unit attention pending, skips the data and resets
+			// the drive if DRQ is still set when it starts its next command.
+			const u32 status = GDStatus.full;
+			pio_buff.clear();
+			GDStatus.DRQ = 0;
+			IntReason.CoD = 1;
+			IntReason.IO = 1;
+			gd_set_state(gds_waitcmd);
+			return status;
+		}
 		return GDStatus.full;
 
 	case GD_ALTSTAT_Read:
@@ -1278,7 +1397,19 @@ static int GDRomschd(int tag, int cycles, int jitter, void *arg)
 			dma_buff.fill(read_params);
 			// transfer up to len bytes
 			const u32 buff_size = std::min(dma_buff.getSize(), len);
-
+#if SH4_TRACE
+			if (sh4trace::targetOverlap(src, buff_size) && read_params.sector_type != 0)
+			{
+				// start_sector points past the buffered sectors; getSize includes the unread tail.
+				const u64 streamByte = (u64)read_params.start_sector * read_params.sector_type
+						- dma_buff.getSize() + ((0x40u - (src & 0x00ffffff)) & 0x00ffffff);
+				const u32 fad = streamByte / read_params.sector_type;
+				WARN_LOG(GDROM, "TARGET40 GD source FAD %u LBA %d sector-offset %u sector-size %u instr %llu",
+						fad, (int)fad - 150, (u32)(streamByte % read_params.sector_type), read_params.sector_type,
+						(unsigned long long)sh4trace::instrCount);
+			}
+			sh4trace::dmaWrite("gddma", src, buff_size);
+#endif
 			WriteMemBlock_nommu_ptr(src, (const u32 *)dma_buff.read(buff_size), buff_size);
 			src += buff_size;
 			len -= buff_size;
@@ -1295,6 +1426,17 @@ static int GDRomschd(int tag, int cycles, int jitter, void *arg)
 	if (SB_GDLEND == SB_GDLEN)
 	{
 		SB_GDST = 0;
+#if SH4_TRACE
+		if (SB_GDLEN > 0x100000)
+		{
+			WARN_LOG(GDROM, "large GD-DMA done: %08x..%08x (instr %llu)", SB_GDSTAR, SB_GDSTAR + SB_GDLEN,
+					(unsigned long long)sh4trace::instrCount);
+			sh4trace::armAfterDma = true;
+			sh4trace::dmaDoneAt = sh4trace::instrCount;
+			sh4trace::snapshot("gddma_done", Sh4cntx.pc, 0);
+			sh4trace::snapLow();
+		}
+#endif
 		asic_RaiseInterrupt(holly_GDROM_DMA);
 	}
 	// Read ALL sectors and all buffer
@@ -1319,6 +1461,17 @@ static void GDROM_DmaStart(u32 addr, u32 data)
 		}
 		SB_GDSTARD = SB_GDSTAR;
 		SB_GDLEND = 0;
+#if SH4_TRACE
+		if (SB_GDLEN > 0x100000)
+		{
+			WARN_LOG(GDROM, "large GD-DMA start: %08x len %x (instr %llu)", SB_GDSTAR, SB_GDLEN,
+					(unsigned long long)sh4trace::instrCount);
+			sh4trace::armAfterStart = 8;
+			sh4trace::dmaStartAt = sh4trace::instrCount;
+			sh4trace::dumpIntTable("large GD-DMA start");
+			sh4trace::snapshot("gddma_start", Sh4cntx.pc, 0);
+		}
+#endif
 		DEBUG_LOG(GDROM, "GDROM-DMA start addr %08X len %d fad %x", SB_GDSTAR, SB_GDLEN, read_params.start_sector);
 
 		int ticks = getGDROMTicks();

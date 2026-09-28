@@ -5,6 +5,8 @@
 #include "hw/sh4/sh4_core.h"
 #include "hw/sh4/sh4_rom.h"
 #include "hw/sh4/sh4_mem.h"
+#include "hw/sh4/sh4_fpu_approx.h"
+#include <cstring>
 
 static u32 GetN(u32 op) {
 	return (op >> 8) & 0xf;
@@ -24,6 +26,22 @@ static void setDRn(Sh4Context *ctx, u32 op, double d) {
 }
 
 static void iNimp(const char *str);
+
+// FIPR, FTRV, FSCA and FSRRA use the bit-exact models in sh4_fpu_approx.h (verified against a real
+// Dreamcast): result bits, FPSCR cause/flag update and FPU exception trap (the destination is then unchanged).
+static u32 floatBits(float f) {
+	u32 u;
+	memcpy(&u, &f, sizeof(u));
+	return u;
+}
+static float bitsFloat(u32 u) {
+	float f;
+	memcpy(&f, &u, sizeof(f));
+	return f;
+}
+static void fpuTrap(Sh4Context *ctx) {
+	throw SH4ThrownException(ctx->pc - 2, Sh4Ex_FpuError);
+}
 
 #define CHECK_FPU_32(v) v = fixNaN(v)
 
@@ -328,43 +346,23 @@ sh4op(i1111_nnnn_0101_1101)
 //FSCA FPUL, DRn//F0FD//1111_nnn0_1111_1101
 sh4op(i1111_nnn0_1111_1101)
 {
-	int n=GetN(op) & 0xE;
-
-
-	//cosine(x) = sine(pi/2 + x).
-	if (ctx->fpscr.PR==0)
-	{
-		u32 pi_index = ctx->fpul & 0xFFFF;
-
-	#ifdef NATIVE_FSCA
-			float rads = pi_index / (65536.0f / 2) * float(M_PI);
-
-			ctx->fr[n + 0] = sinf(rads);
-			ctx->fr[n + 1] = cosf(rads);
-
-			CHECK_FPU_32(ctx->fr[n]);
-			CHECK_FPU_32(ctx->fr[n + 1]);
-	#else
-			ctx->fr[n + 0] = sin_table[pi_index].u[0];
-			ctx->fr[n + 1] = sin_table[pi_index].u[1];
-	#endif
-
-	}
-	else
-		iNimp("FSCA : Double precision mode");
+	int n = GetN(op) & 0xE;
+	u32 s = floatBits(ctx->fr[n]), c = floatBits(ctx->fr[n + 1]);
+	if (sh4_fsca_ex(ctx->fpul, &ctx->fpscr.full, &s, &c))
+		fpuTrap(ctx);
+	ctx->fr[n] = bitsFloat(s);
+	ctx->fr[n + 1] = bitsFloat(c);
 }
 
 //FSRRA //1111_nnnn_0111_1101
 sh4op(i1111_nnnn_0111_1101)
 {
 	u32 n = GetN(op);
-	if (ctx->fpscr.PR==0)
-	{
-		ctx->fr[n] = 1.f / sqrtf(ctx->fr[n]);
-		CHECK_FPU_32(ctx->fr[n]);
-	}
-	else
-		iNimp("FSRRA : Double precision mode");
+	u32 r;
+	int trap = sh4_fsrra_ex(floatBits(ctx->fr[n]), &ctx->fpscr.full, &r);
+	ctx->fr[n] = bitsFloat(r);	// unchanged on a trap or with PR=1
+	if (trap)
+		fpuTrap(ctx);
 }
 
 //fcnvds <DR_N>,FPUL
@@ -402,18 +400,16 @@ sh4op(i1111_nnmm_1110_1101)
 {
 	int n = GetN(op) & 0xC;
 	int m = (GetN(op) & 0x3) << 2;
-	if (ctx->fpscr.PR == 0)
+	u32 fvm[4], fvn[4], r;
+	for (int i = 0; i < 4; i++)
 	{
-		double idp = (double)ctx->fr[n + 0] * ctx->fr[m + 0];
-		idp += (double)ctx->fr[n + 1] * ctx->fr[m + 1];
-		idp += (double)ctx->fr[n + 2] * ctx->fr[m + 2];
-		idp += (double)ctx->fr[n + 3] * ctx->fr[m + 3];
-
-		ctx->fr[n + 3] = fixNaN((float)idp);
+		fvm[i] = floatBits(ctx->fr[m + i]);
+		fvn[i] = floatBits(ctx->fr[n + i]);
 	}
-	else {
-		iNimp("FIPR with FPSCR.PR=1");
-	}
+	r = fvn[3];
+	if (sh4_fipr_ex(fvm, fvn, &ctx->fpscr.full, &r))
+		fpuTrap(ctx);
+	ctx->fr[n + 3] = bitsFloat(r);
 }
 
 //fldi0 <FREG_N>
@@ -575,39 +571,16 @@ sh4op(i1111_nn01_1111_1101)
 	XF[2] XF[6] XF[10] XF[14]   FR[n+2]    FR[n+2]
 	XF[3] XF[7] XF[11] XF[15]   FR[n+3]    FR[n+3]
 	*/
-
 	u32 n = GetN(op) & 0xC;
-
-	if (ctx->fpscr.PR==0)
-	{
-		double v1 = (double)ctx->xf[0]  * ctx->fr[n + 0] +
-					(double)ctx->xf[4]  * ctx->fr[n + 1] +
-					(double)ctx->xf[8]  * ctx->fr[n + 2] +
-					(double)ctx->xf[12] * ctx->fr[n + 3];
-
-		double v2 = (double)ctx->xf[1]  * ctx->fr[n + 0] +
-					(double)ctx->xf[5]  * ctx->fr[n + 1] +
-					(double)ctx->xf[9]  * ctx->fr[n + 2] +
-					(double)ctx->xf[13] * ctx->fr[n + 3];
-
-		double v3 = (double)ctx->xf[2]  * ctx->fr[n + 0] +
-					(double)ctx->xf[6]  * ctx->fr[n + 1] +
-					(double)ctx->xf[10] * ctx->fr[n + 2] +
-					(double)ctx->xf[14] * ctx->fr[n + 3];
-
-		double v4 = (double)ctx->xf[3]  * ctx->fr[n + 0] +
-					(double)ctx->xf[7]  * ctx->fr[n + 1] +
-					(double)ctx->xf[11] * ctx->fr[n + 2] +
-					(double)ctx->xf[15] * ctx->fr[n + 3];
-
-		ctx->fr[n + 0] = fixNaN((float)v1);
-		ctx->fr[n + 1] = fixNaN((float)v2);
-		ctx->fr[n + 2] = fixNaN((float)v3);
-		ctx->fr[n + 3] = fixNaN((float)v4);
-	}
-	else {
-		iNimp("FTRV with FPSCR.PR=1");
-	}
+	u32 xmtrx[16], fv[4];
+	for (int i = 0; i < 16; i++)
+		xmtrx[i] = floatBits(ctx->xf[i]);
+	for (int i = 0; i < 4; i++)
+		fv[i] = floatBits(ctx->fr[n + i]);
+	if (sh4_ftrv_ex(xmtrx, fv, &ctx->fpscr.full))
+		fpuTrap(ctx);
+	for (int i = 0; i < 4; i++)
+		ctx->fr[n + i] = bitsFloat(fv[i]);
 }
 
 static void iNimp(const char *str)

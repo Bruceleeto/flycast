@@ -6,6 +6,7 @@
 #include "hw/sh4/sh4_sched.h"
 #include "hw/sh4/sh4_interrupts.h"
 #include "hw/sh4/sh4_mmr.h"
+#include "hw/sh4/sh4_trace.h"
 #include "serialize.h"
 
 #define tmu_underflow 0x0100
@@ -21,7 +22,7 @@ int tmu_sched[3];
 static s64 tmu_ch_base[3];
 
 inline static u64 now() {
-	return sh4_sched_now64() + SH4_TIMESLICE - p_sh4rcb->cntx.cycle_counter;
+	return sh4_sched_now64() + sh4SliceLength - p_sh4rcb->cntx.cycle_counter;
 }
 
 static s64 read_TMU_TCNTch(u32 ch) {
@@ -65,10 +66,11 @@ template<u32 ch>
 static u32 read_TMU_TCNT(u32 addr)
 {
 	s64 v = read_TMU_TCNTch(ch);
-	if (v < 0)
-		return reloadCounter(ch, v);
-	else
-		return (u32)v;
+	const u32 r = v < 0 ? reloadCounter(ch, v) : (u32)v;
+#if SH4_TRACE
+	sh4trace::tmu(ch, r, now());
+#endif
+	return r;
 }
 
 template<u32 ch>
