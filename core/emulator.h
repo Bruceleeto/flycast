@@ -197,6 +197,7 @@ public:
 private:
 	bool checkStatus(bool wait = false);
 	void runInternal();
+	bool switchExecutorForCounts();
 	void diskChange();
 
 	enum State {
@@ -218,6 +219,7 @@ private:
 	std::mutex mutex;
 	Sh4Executor *interpreter = nullptr;
 	Sh4Executor *recompiler = nullptr;
+	bool restoreDynarec = false;	// sh4opt switched to the interpreter for a recording
 	ThreadRunner runner;
 };
 extern Emulator emu;

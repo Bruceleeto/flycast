@@ -17,6 +17,7 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
  */
 #include "gui.h"
+#include "hw/sh4/interpr/sh4opt_counts.h"
 #include "rend/osd.h"
 #include "cfg/cfg.h"
 #include "imgui.h"
@@ -1496,6 +1497,27 @@ void gui_draw_osd()
 	}
 	if (!settings.raHardcoreMode)
 		lua::overlay();
+	if (sh4opt_counting_requested())
+	{
+		// sh4opt execution counts: always-on record button, top left
+		ImGui::SetNextWindowPos(ImVec2(insetLeft + uiScaled(8.f), uiScaled(8.f)));
+		ImGui::SetNextWindowBgAlpha(0.6f);
+		ImGui::Begin("##sh4opt", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize
+				| ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+		bool recording = sh4opt_is_recording();
+		char label[64];
+		if (recording)
+			std::snprintf(label, sizeof(label), "Stop & save (%u vblanks)###sh4opt_rec", sh4opt_recorded_vblanks());
+		else
+			std::snprintf(label, sizeof(label), "Record###sh4opt_rec");
+		if (recording)
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.1f, 0.1f, 1.f));
+		if (ImGui::Button(label))
+			sh4opt_toggle_recording();
+		if (recording)
+			ImGui::PopStyleColor();
+		ImGui::End();
+	}
 	vgamepad::draw();
     ImGui::Render();
 	uiThreadRunner.execTasks();

@@ -55,6 +55,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include "hw/sh4/interpr/sh4opt_counts.h"
 
 settings_t settings;
 constexpr char const *BIOS_TITLE = "Dreamcast BIOS";
@@ -764,7 +765,7 @@ void Emulator::runInternal()
 					if (!restartCpu())
 						resetRequested = false;
 				}
-			} while (resetRequested);
+			} while (resetRequested || switchExecutorForCounts());
 		}
 	} catch (...) {
 		runner.term();
@@ -1120,6 +1121,35 @@ void Emulator::vblank()
 		ggpo::endOfFrame();
 	else if (!config::ThreadedRendering)
 		getSh4Executor()->Stop();
+}
+
+// sh4opt counts are taken in the interpreter: use it while recording, then the configured executor.
+bool Emulator::switchExecutorForCounts()
+{
+	if (!sh4opt_take_executor_switch())
+		return false;
+	const std::lock_guard<std::mutex> _(mutex);
+	if (state != Running)
+		return false;
+	if (sh4opt_needs_interpreter())
+	{
+		if (config::DynarecEnabled)
+		{
+			restoreDynarec = true;
+			config::DynarecEnabled.override(false);
+			NOTICE_LOG(COMMON, "sh4opt: switched to the interpreter for recording");
+		}
+	}
+	else if (restoreDynarec)
+	{
+		restoreDynarec = false;
+		config::DynarecEnabled.override(true);
+		// Code may have been loaded or patched while the interpreter ran.
+		getSh4Executor()->ResetCache();
+		NOTICE_LOG(COMMON, "sh4opt: switched back to the dynarec");
+	}
+	getSh4Executor()->Start();
+	return true;
 }
 
 bool Emulator::restartCpu()

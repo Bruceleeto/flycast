@@ -1,6 +1,7 @@
 #pragma once
 #include "types.h"
 #include "sh4_cycles.h"
+#include "interpr/sh4opt_counts.h"
 
 class Sh4Interpreter : public Sh4Executor
 {
@@ -27,7 +28,8 @@ private:
 	void ExecuteOpcode(u16 op);
 	u16 ReadNexOp();
 
-	Sh4Cycles sh4cycles{CPU_RATIO};
+	// sh4opt counting runs the SH4 at full emulated speed so each vblank holds a real frame's work.
+	Sh4Cycles sh4cycles{sh4opt_counting_requested() ? 1 : CPU_RATIO};
 	// SH4 underclock factor when using the interpreter so that it's somewhat usable
 #ifdef STRICT_MODE
 	static constexpr int CPU_RATIO = 1;

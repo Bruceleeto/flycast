@@ -17,6 +17,7 @@
 #include <cassert>
 #include <mutex>
 #include <deque>
+#include "hw/sh4/interpr/sh4opt_counts.h"
 
 #ifdef LIBRETRO
 void retro_rend_present();
@@ -680,6 +681,7 @@ void rend_vblank()
 	}
 
 	render_called = false;
+	sh4opt_vblank();
 	emu.vblank();
 	swapIntervalDetector.vblank();
 }
