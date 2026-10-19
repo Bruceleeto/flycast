@@ -11,6 +11,7 @@
 #include "reios.h"
 
 #include "reios_elf.h"
+#include "dcload.h"
 
 #include "gdrom_hle.h"
 #include "descrambl.h"
@@ -661,6 +662,7 @@ static void reios_boot()
 	{
 		if (!reios_loadElf(settings.content.path))
 			throw FlycastException(strprintf(i18n::T("Failed to open ELF %s"), settings.content.path.c_str()));
+		dcload_install(settings.content.path);
 		reios_setup_state(0x8C010000);
 	}
 	else {
@@ -710,6 +712,8 @@ static const std::map<u32, hook_fp*> hooks = {
 		{ SYSCALL_ADDR(0x8C001008), reios_sys_misc },
 
 		{ SYSCALL_ADDR(dc_bios_entrypoint_gd2), gdrom_hle_op },
+
+		{ SYSCALL_ADDR(DCLOAD_HOOK_ADDR), dcload_syscall },
 };
 
 void DYNACALL reios_trap(Sh4Context *ctx, u32 op)

@@ -1,4 +1,6 @@
 target_sources(${PROJECT_NAME} PRIVATE
+        dcload.cpp
+        dcload.h
         descrambl.cpp
         descrambl.h
         gdrom_hle.cpp

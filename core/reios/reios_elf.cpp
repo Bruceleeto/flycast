@@ -31,7 +31,7 @@ bool reios_loadElf(const std::string& elf) {
 	std::fseek(f, 0, SEEK_END);
 	size_t size = std::ftell(f);
 
-	if (size == 0 || size > 16_MB) {
+	if (size == 0 || size > 256_MB) {
 		std::fclose(f);
 		return false;
 	}
